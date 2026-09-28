@@ -216,8 +216,12 @@ describe("packaged keyring native binding", () => {
     const root = tempRoot();
     const output = join(root, "dist", "standalone", "bun-darwin-arm64");
     const asset = keyringAssetForStandaloneTarget("bun-darwin-arm64")!;
-    const source = join(root, "node_modules", asset.packageName, asset.filename);
+    const wrapper = join(root, "node_modules", "@napi-rs", "keyring");
+    const packageRoot = join(wrapper, "node_modules", asset.packageName);
+    const source = join(packageRoot, asset.filename);
     mkdirSync(join(source, ".."), { recursive: true });
+    writeFileSync(join(wrapper, "package.json"), JSON.stringify({ name: "@napi-rs/keyring" }));
+    writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: asset.packageName, main: asset.filename }));
     writeFileSync(source, "native-addon");
     const destination = stageStandaloneKeyringAddon(root, output, "bun-darwin-arm64");
     expect(destination).toBe(join(output, "keyring", asset.filename));
