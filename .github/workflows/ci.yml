@@ -1311,7 +1311,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          bun install --frozen-lockfile
+          # The universal sidecar executes as either architecture, so its resource set must carry
+          # both Darwin N-API packages even though the hosted runner itself is arm64.
+          bun install --frozen-lockfile --os=darwin --cpu=*
           cd desktop
           bun install --frozen-lockfile
 

@@ -52,6 +52,7 @@ if (!existsSync(executable)) {
 const desktopRoot = resolve(import.meta.dir, "..");
 const binaries = join(desktopRoot, "src-tauri", "binaries");
 const resources = join(desktopRoot, "src-tauri", "resources", "gui", "dist");
+const keyringResources = join(desktopRoot, "src-tauri", "resources", "keyring");
 mkdirSync(binaries, { recursive: true });
 mkdirSync(resources, { recursive: true });
 const destination = join(binaries, `ocx-${triple}${target.startsWith("bun-windows-") ? ".exe" : ""}`);
@@ -60,5 +61,6 @@ if (shouldAdHocSignSidecar(process.platform, target)) {
   const signed = adHocSignSidecar(destination);
   if (signed !== 0) process.exit(signed);
 }
+cpSync(join(source, "keyring"), keyringResources, { recursive: true });
 cpSync(join(repoRoot, "gui", "dist"), resources, { recursive: true });
 console.log(`Prepared ${destination}`);

@@ -1,5 +1,28 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runKeyringSmoke, type KeyringSmokeEntry } from "../../scripts/keyring-smoke";
+import { stageStandaloneKeyringAddon } from "../../scripts/standalone-keyring";
+import {
+  keyringAssetForStandaloneTarget,
+  loadKeyringBinding,
+  packagedKeyringCandidates,
+  type KeyringBinding,
+} from "../../src/lib/keyring-native";
+import { repoPath } from "../helpers/repo-root";
+
+const roots: string[] = [];
+
+afterEach(() => {
+  while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
+});
+
+function tempRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), "ocx-keyring-package-"));
+  roots.push(root);
+  return root;
+}
 
 class MemoryKeyringEntry implements KeyringSmokeEntry {
   secret: Buffer | null = null;
@@ -130,5 +153,85 @@ describe("runKeyringSmoke", () => {
     })).rejects.toThrow("could not delete the temporary entry");
 
     expect(entry.deletes).toBe(1);
+  });
+});
+
+describe("packaged keyring native binding", () => {
+  test("maps every standalone release target to an exact native package", () => {
+    expect(keyringAssetForStandaloneTarget("bun-darwin-arm64")).toEqual({
+      packageName: "@napi-rs/keyring-darwin-arm64",
+      filename: "keyring.darwin-arm64.node",
+    });
+    expect(keyringAssetForStandaloneTarget("bun-darwin-x64")?.filename).toBe("keyring.darwin-x64.node");
+    expect(keyringAssetForStandaloneTarget("bun-windows-x64")?.filename).toBe("keyring.win32-x64-msvc.node");
+    expect(keyringAssetForStandaloneTarget("bun-linux-x64")?.filename).toBe("keyring.linux-x64-gnu.node");
+    expect(keyringAssetForStandaloneTarget("bun-linux-arm64")?.filename).toBe("keyring.linux-arm64-gnu.node");
+    expect(keyringAssetForStandaloneTarget("bun-freebsd-x64")).toBeUndefined();
+  });
+
+  test("resolves a macOS app resource before the standalone-adjacent fallback", () => {
+    expect(packagedKeyringCandidates({
+      executable: "/Applications/OpenCodex.app/Contents/MacOS/ocx",
+      platform: "darwin",
+      arch: "arm64",
+    })).toEqual([
+      "/Applications/OpenCodex.app/Contents/Resources/keyring/keyring.darwin-arm64.node",
+      "/Applications/OpenCodex.app/Contents/MacOS/keyring/keyring.darwin-arm64.node",
+    ]);
+  });
+
+  test("loads only an existing deterministic packaged path and never consults cwd", () => {
+    const binding = { Entry: class {}, AsyncEntry: class {} } as unknown as KeyringBinding;
+    const calls: string[] = [];
+    const result = loadKeyringBinding({
+      candidates: ["/signed/app/keyring.node", "./keyring.node"],
+      fileExists: path => path === "/signed/app/keyring.node",
+      load: specifier => { calls.push(specifier); return binding; },
+    });
+    expect(result).toBe(binding);
+    expect(calls).toEqual(["/signed/app/keyring.node"]);
+  });
+
+  test("falls back to package resolution for source and npm installs", () => {
+    const calls: string[] = [];
+    loadKeyringBinding({
+      candidates: ["/missing/keyring.node"],
+      fileExists: () => false,
+      load: specifier => { calls.push(specifier); return { Entry: class {}, AsyncEntry: class {} }; },
+    });
+    expect(calls).toEqual(["@napi-rs/keyring"]);
+  });
+
+  test("stages the selected addon under the standalone output", () => {
+    const root = tempRoot();
+    const output = join(root, "dist", "standalone", "bun-darwin-arm64");
+    const asset = keyringAssetForStandaloneTarget("bun-darwin-arm64")!;
+    const source = join(root, "node_modules", asset.packageName, asset.filename);
+    mkdirSync(join(source, ".."), { recursive: true });
+    writeFileSync(source, "native-addon");
+    const destination = stageStandaloneKeyringAddon(root, output, "bun-darwin-arm64");
+    expect(destination).toBe(join(output, "keyring", asset.filename));
+    expect(existsSync(destination)).toBe(true);
+    expect(readFileSync(destination, "utf8")).toBe("native-addon");
+  });
+
+  test("refuses a build whose target optional dependency was not installed", () => {
+    const root = tempRoot();
+    expect(() => stageStandaloneKeyringAddon(root, join(root, "out"), "bun-darwin-x64"))
+      .toThrow("install target optional dependencies");
+  });
+
+  test("desktop and release packaging retain the external addon and packaged-app proof", () => {
+    const config = JSON.parse(readFileSync(repoPath("desktop", "src-tauri", "tauri.conf.json"), "utf8"));
+    expect(config.bundle.resources["resources/keyring"]).toBe("keyring");
+    const release = readFileSync(repoPath(".github", "workflows", "release.yml"), "utf8");
+    expect(release).toContain("ocx.exe,gui,keyring");
+    expect(release).toContain("ocx gui keyring");
+    expect(release).toContain("--os=${{ matrix.dependency_os }} --cpu=${{ matrix.dependency_cpu }}");
+    expect(release).toContain('dependency_cpu: "*"');
+    const verify = readFileSync(repoPath("desktop", "scripts", "verify-macos-runtime.sh"), "utf8");
+    expect(verify).toContain('cd "$scratch/work"');
+    expect(verify).toContain("provider keychain openai status --json");
+    expect(verify).toContain('value.get("keychainAvailable") is True');
   });
 });

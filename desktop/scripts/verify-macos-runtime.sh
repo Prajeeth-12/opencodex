@@ -6,7 +6,15 @@ app="${1:?usage: verify-macos-runtime.sh /path/to/OpenCodex.app}"
 executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
 [[ -n "$executable" && "$executable" != */* ]] || { echo 'Invalid app executable name' >&2; exit 1; }
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/opencodex-bundle-check.XXXXXX")"
-trap 'rm -rf "$scratch"' EXIT
+proxy_pid=""
+cleanup() {
+  if [[ -n "$proxy_pid" ]]; then
+    kill "$proxy_pid" 2>/dev/null || true
+    wait "$proxy_pid" 2>/dev/null || true
+  fi
+  rm -rf "$scratch"
+}
+trap cleanup EXIT
 
 codesign --verify --strict --deep "$app"
 verify_member() {
@@ -39,4 +47,32 @@ value = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert value.get("schema") == "ocx-resolve/1", "Unexpected resolve schema"
 assert value.get("liveness", {}).get("status") in ("live", "absent-proven"), "Unusable resolve result"
 PY
-printf '%s\n' 'PASS: macOS signatures, exact entitlements, hardened runtime, Liquid Glass and bundled CLI resolve'
+
+# Reproduce the packaged-keyring boundary from an unrelated cwd. Source-tree smoke tests prove the
+# OS store, but they do not prove that Bun can find the N-API addon outside its virtual `$bunfs`.
+mkdir -p "$scratch/home" "$scratch/work"
+(
+  cd "$scratch/work"
+  HOME="$scratch/home" OPENCODEX_HOME="$scratch/home/.opencodex" \
+    "$app/Contents/MacOS/ocx" start --port 10179 > "$scratch/proxy.log" 2>&1
+) &
+proxy_pid=$!
+for _ in $(seq 1 30); do
+  curl -fsS http://127.0.0.1:10179/healthz >/dev/null 2>&1 && break
+  sleep 1
+done
+curl -fsS http://127.0.0.1:10179/healthz >/dev/null
+(
+  cd "$scratch/work"
+  HOME="$scratch/home" OPENCODEX_HOME="$scratch/home/.opencodex" \
+    "$app/Contents/MacOS/ocx" provider keychain openai status --json > "$scratch/keyring.json"
+)
+python3 - "$scratch/keyring.json" <<'PY'
+import json, pathlib, sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert value.get("keychainAvailable") is True, "Packaged keyring binding is unavailable"
+PY
+kill "$proxy_pid" 2>/dev/null || true
+wait "$proxy_pid" 2>/dev/null || true
+proxy_pid=""
+printf '%s\n' 'PASS: macOS signatures, entitlements, hardened runtime, Liquid Glass, bundled CLI resolve and packaged keyring'

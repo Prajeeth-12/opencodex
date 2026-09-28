@@ -360,6 +360,23 @@ Bun targets and prepares the external binary plus dashboard resources used by
 Tauri. Generated files under desktop/src-tauri/binaries/ and
 desktop/src-tauri/resources/ remain ignored.
 
+### Packaged native keyring binding
+
+The compiled `ocx` sidecar cannot resolve or execute a N-API addon from Bun's virtual
+`$bunfs`. `scripts/build-standalone.ts` therefore stages the exact target's pinned
+`@napi-rs/keyring-*` binary under `keyring/`, and `desktop/scripts/prepare-sidecar.ts`
+copies that directory into Tauri resources. A universal macOS bundle carries both Darwin
+architectures. `src/lib/keyring-native.ts` selects only the platform/architecture filename
+under `Contents/Resources/keyring` (or an adjacent standalone `keyring/` directory); it never
+searches the launch working directory. Source and npm installs retain ordinary package
+resolution as their fallback.
+
+The macOS bundle verifier launches the signed sidecar from a disposable unrelated directory,
+starts an isolated proxy home, and requires the provider-keychain status probe to load and use
+the packaged binding. Merely finding a `.node` file in the app is not sufficient evidence.
+
+> Decision record: [ADR-6139](decisions/ADR-6139-packaged-native-keyring-binding.md)
+
 The management API companion presence check in
 `src/server/management/companion-routes.ts` accepts both
 `OpenCodexMenuBar/` (legacy Swift companion) and `OpenCodexDesktop/` user agents.
