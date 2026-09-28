@@ -35,6 +35,7 @@ describe("Linux packaged desktop E2E in CI", () => {
     expect(shell?.if).toContain("needs.changes.outputs.desktop == 'true'");
     const checkResources = shell?.steps?.find(step => step.name === "Prepare desktop check resources");
     expect(checkResources?.run).toContain("binaries/ocx-");
+    expect(checkResources?.run).toContain("resources/keyring");
     expect(checkResources?.run).not.toContain("resources/sidecar/ocx");
     const preserve = shell?.steps?.find(step => step.name === "Preserve the compiled Linux sidecar");
     expect(preserve?.run).toContain("chmod +x desktop/scripts/appimage-patchelf.py");

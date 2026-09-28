@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-app="${1:?usage: verify-macos-runtime.sh /path/to/OpenCodex.app}"
+app_input="${1:?usage: verify-macos-runtime.sh /path/to/OpenCodex.app}"
+app="$(cd "$(dirname "$app_input")" && pwd)/$(basename "$app_input")"
 [[ "$(uname -s)" == Darwin ]] || { echo 'macOS bundle verification requires macOS' >&2; exit 1; }
 executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
 [[ -n "$executable" && "$executable" != */* ]] || { echo 'Invalid app executable name' >&2; exit 1; }

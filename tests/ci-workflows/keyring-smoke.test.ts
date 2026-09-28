@@ -270,6 +270,7 @@ describe("packaged keyring native binding", () => {
     expect(ci).toContain("Verify packaged Linux sidecar keyring");
     expect(ci).toContain('bash desktop/scripts/verify-linux-sidecar.sh "$BUNDLE_ROOT/appimage"');
     const verify = readFileSync(repoPath("desktop", "scripts", "verify-macos-runtime.sh"), "utf8");
+    expect(verify).toContain('app="$(cd "$(dirname "$app_input")" && pwd)/$(basename "$app_input")"');
     expect(verify).toContain("cwd=work");
     expect(verify).toContain('"__keyring-load-check"');
     expect(verify).toContain('"schema": "ocx-keyring-load/1"');
