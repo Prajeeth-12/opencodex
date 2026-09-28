@@ -209,10 +209,6 @@ export default function ProviderAuthPanel({
     else void authHandlers?.onLogin(item.name, addAccount);
   };
   const [newKey, setNewKey] = useState("");
-  // The settings card can save a new default before the account roster refreshes.
-  // Only confirmed server values seed a new override; keep dirty custom drafts unchanged.
-  const [poolThreshold, setPoolThreshold] = useState<{ apiBase: string; value: number } | null>(null);
-  const onPoolThresholdChange = useCallback((value: number) => setPoolThreshold({ apiBase, value }), [apiBase]);
   const [keyBusy, setKeyBusy] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [importStatus, setImportStatus] = useState<"idle" | "invalid" | "failed" | "complete">("idle");
@@ -433,7 +429,12 @@ export default function ProviderAuthPanel({
         {isOauth && (
           <>
             {item.name === "anthropic" && (
-              <AnthropicAccountPoolSettings apiBase={apiBase} accountCount={accounts.length} onThresholdChange={onPoolThresholdChange} />
+              <AnthropicAccountPoolSettings
+                key={apiBase}
+                apiBase={apiBase}
+                accountCount={accounts.length}
+                onThresholdChange={threshold => { void authHandlers?.onAccountPoolThreshold?.(item.name, threshold); }}
+              />
             )}
             {item.name === "google-antigravity" && (
               <div className="pwi-auth-add-key">
@@ -630,7 +631,7 @@ export default function ProviderAuthPanel({
                         && account.autoSwitchThreshold !== undefined && authHandlers.onAccountThreshold && (
                         <AccountAutoSwitchControl
                           accountLabel={label} inputId={`anthropic-threshold-${account.id}`}
-                          globalThreshold={poolThreshold?.apiBase === apiBase ? poolThreshold.value : account.autoSwitchThreshold} override={account.autoSwitchThresholdOverride}
+                          globalThreshold={account.autoSwitchThreshold} override={account.autoSwitchThresholdOverride}
                           hintText={t("pws.anthropicAccountThresholdHint")}
                           disabled={busy || Boolean(switchingAccountId) || Boolean(pausingAccountId)}
                           onChange={threshold => authHandlers.onAccountThreshold!(item.name, account, threshold)}

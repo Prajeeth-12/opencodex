@@ -136,6 +136,27 @@ describe("Anthropic account pool quota window", () => {
     expect(values).toEqual([64, 73]);
   });
 
+  test("an unmounted settings card aborts its save without publishing the old server value", async () => {
+    let aborted = false;
+    globalThis.fetch = (async (_input, init) => {
+      if (init?.method !== "PUT") return Response.json({ enabled: true, autoSwitchThreshold: 64, strategy: "quota", stickyLimit: 1, quotaWindow: "five-hour" });
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => {
+          aborted = true;
+          reject(new Error("aborted"));
+        }, { once: true });
+      });
+    }) as typeof fetch;
+    const values: number[] = [];
+    const host = await mountPool(value => { values.push(value); });
+    const toggle = host.querySelector('button[aria-pressed]') as HTMLButtonElement;
+    await act(async () => { toggle.click(); await Promise.resolve(); });
+    const root = mountedRoots.pop();
+    await act(async () => { root?.unmount(); await Promise.resolve(); });
+    expect(aborted).toBe(true);
+    expect(values).toEqual([64]);
+  });
+
   test("quota window selector renders for quota and fill-first strategies", async () => {
     stubPool({
       enabled: true,

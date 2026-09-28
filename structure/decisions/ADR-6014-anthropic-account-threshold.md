@@ -31,10 +31,13 @@
   and roster generations protect GUI reads. GET and PUT both use the built-in Anthropic OAuth
   definition when the explicit provider row is absent, and each PUT response projects the value
   committed by that request instead of re-reading a later concurrent write. Focus/draft behavior
-  uses existing React components with a localized Anthropic hint. Additional auth-store reads occur
+  uses existing React components with a localized Anthropic hint. The confirmed pool default lives
+  in the shared account-roster state: settings reads/saves invalidate older roster generations and
+  start a fresh read, so late responses cannot overwrite a save while later external changes remain
+  observable. Per-account writes use the roster client's bounded, abortable request lifecycle, so an
+  unmount or API-base change cannot leave mutation ownership locked. Additional auth-store reads occur
   at selection boundaries.
   Thresholds are soft preferences, not spend caps; admitted/sent requests are not cancelled.
-  This TypeScript `dev` slice needs maintainer assessment/port to `dev2-go` at integration.
 
 ## Verification
 

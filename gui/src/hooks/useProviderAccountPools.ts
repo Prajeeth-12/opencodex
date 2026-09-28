@@ -365,6 +365,26 @@ export function useProviderAccountPools(deps: {
     return key;
   };
 
+  const setAccountPoolThreshold = async (provider: string, threshold: number): Promise<boolean> => {
+    if (!aliveRef.current || !mountedRef.current || serverRef.current !== apiBase) return false;
+    // Pool settings and roster reads describe one server value. Invalidate older reads before
+    // publishing the confirmed save, then refresh so a concurrent external write can still win.
+    invalidateSelectionReads(provider, "oauth");
+    setAccountSets(current => {
+      const existing = current[provider];
+      return !existing ? current : { ...current, [provider]: { ...existing,
+        accounts: existing.accounts.map(row => ({ ...row,
+          autoSwitchThreshold: threshold,
+          effectiveAutoSwitchThreshold: typeof row.autoSwitchThresholdOverride === "number"
+            ? row.autoSwitchThresholdOverride : threshold,
+        })) } };
+    });
+    // Restart the full roster path, not only the cheap membership read. The settings card can
+    // resolve before the initial account load; cancelling that load without replacing its quota
+    // enrichment would leave usage bars empty until a manual refresh or remount.
+    return fetchAccountSets([provider]);
+  };
+
   const switchAccount = async (provider: string, account: OAuthAccount) => {
     if (account.active || account.needsReauth || account.paused || switchingAccountRef.current || pausingAccountRef.current || selectionMutationsRef.current.has(`oauth:${provider}`)) return;
     const target = { provider, accountId: account.id };
@@ -416,12 +436,21 @@ export function useProviderAccountPools(deps: {
       && selectionMutationsRef.current.get(mutationKey) === mutation;
     const label = oauthAccountDisplayLabel(accountSets[provider]?.accounts ?? [account], account, t);
     try {
-      const res = await fetch(`${apiBase}/api/oauth/accounts/auto-switch`, {
-        method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider, accountId: account.id, threshold }),
-      });
-      if (!res.ok) throw new Error("account threshold write failed");
-      const result = await res.json() as Pick<OAuthAccount, "autoSwitchThresholdOverride" | "autoSwitchThreshold" | "effectiveAutoSwitchThreshold">;
+      const bounded = createBoundedFetch(20_000);
+      requestsRef.current.add(bounded.controller);
+      let result: Pick<OAuthAccount, "autoSwitchThresholdOverride" | "autoSwitchThreshold" | "effectiveAutoSwitchThreshold">;
+      try {
+        const res = await fetch(`${apiBase}/api/oauth/accounts/auto-switch`, {
+          method: "PUT", headers: { "Content-Type": "application/json" }, signal: bounded.signal,
+          body: JSON.stringify({ provider, accountId: account.id, threshold }),
+        });
+        if (!res.ok) throw new Error("account threshold write failed");
+        result = await res.json() as typeof result;
+        if (bounded.signal.aborted) throw new Error("account threshold deadline exceeded");
+      } finally {
+        bounded.clear();
+        requestsRef.current.delete(bounded.controller);
+      }
       const validPercent = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100;
       if (!result || (result.autoSwitchThresholdOverride !== null && !validPercent(result.autoSwitchThresholdOverride))
         || !validPercent(result.autoSwitchThreshold) || !validPercent(result.effectiveAutoSwitchThreshold)) throw new Error("invalid threshold response");
@@ -667,7 +696,7 @@ export function useProviderAccountPools(deps: {
   return {
     accountSets, accountLoadStates, switchingAccount, pausingAccount, openAccounts, keyPools, addingKeyFor, newKeyValue,
     setAccountSets, setAccountLoadStates, setSwitchingAccount, setOpenAccounts, setKeyPools, setAddingKeyFor, setNewKeyValue,
-    fetchAccountSets, fetchKeyPools, refreshAccountRosters, switchAccount, pauseAccount, setAccountThreshold, switchApiKey, removeApiKey, addApiKeyValue, addApiKey, editCredentialAlias, removeAccount,
+    fetchAccountSets, fetchKeyPools, refreshAccountRosters, switchAccount, pauseAccount, setAccountPoolThreshold, setAccountThreshold, switchApiKey, removeApiKey, addApiKeyValue, addApiKey, editCredentialAlias, removeAccount,
     oauthCardProviders, keyCardProviders, activeAccountNeedsReauth,
   };
 }

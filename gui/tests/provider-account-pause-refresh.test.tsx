@@ -84,6 +84,62 @@ test("pending threshold owns its roster generation and blocks conflicting pause"
   expect(pools.accountSets.fixture.accounts[1]?.autoSwitchThresholdOverride).toBe(40);
 });
 
+test("a confirmed pool threshold invalidates an older roster while later external changes still win", async () => {
+  let settleStale!: (response: Response) => void;
+  let reads = 0;
+  const urls: string[] = [];
+  respond = async (url, init) => {
+    if (init?.method === "PUT") return new Response(null, { status: 500 });
+    urls.push(url);
+    reads++;
+    if (reads === 1) return new Promise(resolve => { settleStale = resolve; });
+    const threshold = reads <= 3 ? 70 : 55;
+    return Response.json({ activeAccountId: "a", accounts: [
+      { ...row("a", true), quotaMode: "probe", autoSwitchThresholdOverride: null, autoSwitchThreshold: threshold, effectiveAutoSwitchThreshold: threshold },
+      { ...row("b", false), quotaMode: "probe", autoSwitchThresholdOverride: 40, autoSwitchThreshold: threshold, effectiveAutoSwitchThreshold: 40 },
+    ] });
+  };
+
+  let stale!: Promise<boolean>;
+  await act(async () => { stale = pools.refreshAccountRosters({ provider: "fixture", kind: "oauth" }); });
+  await act(async () => { expect(await pools.setAccountPoolThreshold("fixture", 70)).toBe(true); });
+  await act(async () => { await Promise.resolve(); });
+  expect(urls.some(url => url.includes("quota=1"))).toBe(true);
+  expect(pools.accountSets.fixture.accounts[0]?.autoSwitchThreshold).toBe(70);
+  expect(pools.accountSets.fixture.accounts[1]?.effectiveAutoSwitchThreshold).toBe(40);
+
+  await act(async () => {
+    settleStale(Response.json({ activeAccountId: "a", accounts: [
+      { ...row("a", true), quotaMode: "probe", autoSwitchThresholdOverride: null, autoSwitchThreshold: 65, effectiveAutoSwitchThreshold: 65 },
+      { ...row("b", false), quotaMode: "probe", autoSwitchThresholdOverride: 40, autoSwitchThreshold: 65, effectiveAutoSwitchThreshold: 40 },
+    ] }));
+    await stale;
+  });
+  expect(pools.accountSets.fixture.accounts[0]?.autoSwitchThreshold).toBe(70);
+
+  await act(async () => { expect(await pools.refreshAccountRosters({ provider: "fixture", kind: "oauth" })).toBe(true); });
+  expect(pools.accountSets.fixture.accounts[0]?.autoSwitchThreshold).toBe(55);
+});
+
+test("a stalled account threshold write is aborted when the hook unmounts", async () => {
+  let aborted = false;
+  respond = async (_url, init) => new Promise((_resolve, reject) => {
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+    init?.signal?.addEventListener("abort", () => {
+      aborted = true;
+      reject(new Error("aborted"));
+    }, { once: true });
+  });
+  let pending!: Promise<boolean>;
+  await act(async () => {
+    pending = pools.setAccountThreshold("fixture", row("b", false), 40);
+    await Promise.resolve();
+  });
+  await act(async () => { root?.unmount(); root = null; });
+  expect(await pending).toBe(false);
+  expect(aborted).toBe(true);
+});
+
 test("a saved pause stays visible and only the failed roster refresh is reported", async () => {
   respond = async (_url, init) => init?.method === "PUT"
     ? Response.json({ ok: true, activeAccountId: "a", activeAccountChanged: false })

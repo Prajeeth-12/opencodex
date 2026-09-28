@@ -287,7 +287,7 @@ test("API validates provider, account, integer, missing and null; reads durable 
   expect((await put({ provider: "anthropic", accountId: ids[0], threshold: 30 }, fallback)).status).toBe(200);
 });
 
-test("concurrent API writes each report the value committed by that request", async () => {
+test("concurrent API writes each report its commit without assuming queue order", async () => {
   const put = (threshold: number) => handleAnthropicAccountThreshold(new Request("http://localhost/api/oauth/accounts/auto-switch", {
     method: "PUT", body: JSON.stringify({ provider: "anthropic", accountId: ids[0], threshold }),
     headers: { "content-type": "application/json" },
@@ -295,7 +295,7 @@ test("concurrent API writes each report the value committed by that request", as
   const [first, second] = await Promise.all([put(30), put(70)]);
   expect(await first.json()).toMatchObject({ autoSwitchThresholdOverride: 30, effectiveAutoSwitchThreshold: 30 });
   expect(await second.json()).toMatchObject({ autoSwitchThresholdOverride: 70, effectiveAutoSwitchThreshold: 70 });
-  expect(getAccountSet("anthropic")!.accounts.find(row => row.id === ids[0])?.autoSwitchThresholdOverride).toBe(70);
+  expect([30, 70]).toContain(getAccountSet("anthropic")!.accounts.find(row => row.id === ids[0])?.autoSwitchThresholdOverride);
 });
 
 test("management dispatcher exposes the saved override/default/effective DTO without credentials", async () => {

@@ -2,7 +2,7 @@
  * Opt-in Anthropic OAuth account pool controls (#294).
  * Experimental — shows a strong warning because the feature is not battle-tested.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "../../i18n/shared";
 import { getPoolSettings, putPoolSettings } from "../../pool-settings";
 import {
@@ -50,6 +50,21 @@ export default function AnthropicAccountPoolSettings({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState(false);
+  const onThresholdChangeRef = useRef(onThresholdChange);
+  const mountedRef = useRef(true);
+  const apiBaseRef = useRef(apiBase);
+  const saveAbortRef = useRef<AbortController | null>(null);
+  onThresholdChangeRef.current = onThresholdChange;
+  apiBaseRef.current = apiBase;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      saveAbortRef.current?.abort();
+      saveAbortRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -81,7 +96,7 @@ export default function AnthropicAccountPoolSettings({
           quotaWindow: normalizeAccountPoolQuotaWindow(json.quotaWindow),
         });
         setDraft(String(nextThreshold));
-        onThresholdChange?.(nextThreshold);
+        onThresholdChangeRef.current?.(nextThreshold);
         setStickyDraft(String(nextSticky));
         setLoadError(false);
       })
@@ -93,7 +108,7 @@ export default function AnthropicAccountPoolSettings({
       cancelled = true;
       ac.abort();
     };
-  }, [apiBase, onThresholdChange]);
+  }, [apiBase]);
 
   const save = useCallback(async (next: {
     enabled: boolean;
@@ -102,6 +117,12 @@ export default function AnthropicAccountPoolSettings({
     stickyLimit: number;
     quotaWindow: AccountPoolQuotaWindow;
   }) => {
+    const requestApiBase = apiBase;
+    saveAbortRef.current?.abort();
+    const controller = new AbortController();
+    saveAbortRef.current = controller;
+    const currentRequest = () => mountedRef.current && apiBaseRef.current === requestApiBase
+      && saveAbortRef.current === controller && !controller.signal.aborted;
     const previousState = state;
     setState({
       enabled: next.enabled,
@@ -115,13 +136,14 @@ export default function AnthropicAccountPoolSettings({
     try {
       // The client owns the field mapping: `threshold` becomes `autoSwitchThreshold` and the
       // provider is always sent, so no call site can forget either.
-      const json = await putPoolSettings(apiBase, "anthropic", {
+      const json = await putPoolSettings(requestApiBase, "anthropic", {
         enabled: next.enabled,
         threshold: next.threshold,
         strategy: next.strategy,
         stickyLimit: next.stickyLimit,
         quotaWindow: next.quotaWindow,
-      });
+      }, (input, init) => fetch(input, init), { signal: controller.signal });
+      if (!currentRequest()) return;
       if (!json) throw new Error("save");
       const savedThreshold = typeof json.autoSwitchThreshold === "number" ? json.autoSwitchThreshold : next.threshold;
       const savedStrategy = normalizeAccountPoolStrategy(json?.strategy ?? next.strategy);
@@ -135,9 +157,10 @@ export default function AnthropicAccountPoolSettings({
         quotaWindow: savedWindow,
       });
       setDraft(String(savedThreshold));
-      onThresholdChange?.(savedThreshold);
+      onThresholdChangeRef.current?.(savedThreshold);
       setStickyDraft(String(savedSticky));
     } catch {
+      if (!currentRequest()) return;
       setError(t("anthropicPool.saveFailed"));
       if (previousState) {
         setState(previousState);
@@ -145,9 +168,11 @@ export default function AnthropicAccountPoolSettings({
         setStickyDraft(String(previousState.stickyLimit));
       }
     } finally {
-      setSaving(false);
+      const ownsSave = saveAbortRef.current === controller;
+      if (ownsSave) saveAbortRef.current = null;
+      if (ownsSave && mountedRef.current && apiBaseRef.current === requestApiBase) setSaving(false);
     }
-  }, [apiBase, state, t, onThresholdChange]);
+  }, [apiBase, state, t]);
 
   const enabled = state?.enabled === true;
   const threshold = state?.threshold ?? 80;

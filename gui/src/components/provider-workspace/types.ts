@@ -95,6 +95,7 @@ export interface ProviderAuthHandlers {
   onSwitchAccount: (provider: string, account: OAuthAccountRow) => void | Promise<void>;
   onPauseAccount: (provider: string, account: OAuthAccountRow, paused: boolean) => void | Promise<void>;
   onAccountThreshold?: (provider: string, account: OAuthAccountRow, threshold: number | null) => Promise<boolean>;
+  onAccountPoolThreshold?: (provider: string, threshold: number) => void | Promise<boolean>;
   onRemoveAccount: (provider: string, account: OAuthAccountRow) => void | Promise<void>;
   onRetryAccounts?: (provider: string) => void | Promise<void>;
   onAddApiKey: (provider: string, key: string) => Promise<boolean>;
