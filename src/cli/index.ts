@@ -190,7 +190,6 @@ async function refreshOwnedRaycastCatalog(
 }
 
 initializeNodeLauncherContext();
-
 // The compiled executable is also the capture-only MCP server's launcher.
 // Handle this private entrypoint before CLI preflight or command dispatch.
 if (process.argv[2] === "__keyring-load-check") { console.log(JSON.stringify((await import("../lib/keyring-native")).inspectKeyringBinding())); process.exit(0); }
