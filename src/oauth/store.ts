@@ -626,6 +626,10 @@ function normalizeAccount(value: unknown): ProviderAccount | null {
   if (typeof candidate.alias === "string" && candidate.alias.trim()) account.alias = candidate.alias.trim();
   if (candidate.needsReauth === true) account.needsReauth = true;
   if (candidate.paused === true) account.paused = true;
+  if (typeof candidate.autoSwitchThresholdOverride === "number" && Number.isInteger(candidate.autoSwitchThresholdOverride)
+    && candidate.autoSwitchThresholdOverride >= 0 && candidate.autoSwitchThresholdOverride <= 100) {
+    account.autoSwitchThresholdOverride = candidate.autoSwitchThresholdOverride;
+  }
   if (typeof candidate.addedAt === "number") account.addedAt = candidate.addedAt;
   if (typeof candidate.loginId === "string"
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate.loginId)) {
@@ -1224,6 +1228,23 @@ export type SetAccountPausedResult =
   | { status: "unchanged"; activeAccountId: string; activeAccountChanged: boolean }
   | { status: "not-found" };
 
+/** Serialize policy with refresh/removal; stale pre-wait selection proposals must retry. */
+export async function setAnthropicAccountThreshold(accountId: string, threshold: number | null): Promise<boolean> {
+  if (threshold !== null && (!Number.isInteger(threshold) || threshold < 0 || threshold > 100)) {
+    throw new Error("threshold must be an integer 0-100 or null");
+  }
+  return mutateStore(store => {
+    const set = store.anthropic;
+    const account = set?.accounts.find(row => row.id === accountId);
+    if (!set || !account) return false;
+    if ((account.autoSwitchThresholdOverride ?? null) === threshold) return true;
+    if (threshold === null) delete account.autoSwitchThresholdOverride;
+    else account.autoSwitchThresholdOverride = threshold;
+    set.selectionRevision = randomUUID();
+    return true;
+  }, [accountId, threshold]);
+}
+
 /** Persist an operator pause and move an active account to the next usable unpaused slot when available. */
 export async function setAccountPaused(
   provider: string,
@@ -1323,6 +1344,7 @@ export async function replaceProviderAccountSet(
         ...(account.alias ? { alias: account.alias } : {}),
         ...(account.needsReauth ? { needsReauth: true } : {}),
         ...(account.paused ? { paused: true } : {}),
+        ...(account.autoSwitchThresholdOverride !== undefined ? { autoSwitchThresholdOverride: account.autoSwitchThresholdOverride } : {}),
         ...(account.addedAt !== undefined ? { addedAt: account.addedAt } : {}),
         ...(account.loginId ? { loginId: account.loginId } : {}),
       })),

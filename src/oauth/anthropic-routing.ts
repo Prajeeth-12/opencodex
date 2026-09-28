@@ -35,6 +35,7 @@ import { sweepExpiredOnWrite } from "../lib/state-store-sweeper";
 import { retainedUtf8Bytes } from "../lib/admission";
 import { routeCandidates, type AnthropicRouteDecision } from "./anthropic-model-routes";
 import { subscribeOAuthAccountPauseChanges } from "../lib/account-selection-events";
+import { effectiveAnthropicAccountThreshold } from "./anthropic-account-threshold";
 
 /**
  * The read side of a `Headers` object, so a caller can pass the live upstream response's
@@ -114,6 +115,11 @@ export function anthropicAutoSwitchThreshold(config: OcxConfig): number {
   const value = anthropicAccountPoolConfig(config).autoSwitchThreshold;
   if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100) return value;
   return DEFAULT_AUTO_SWITCH_THRESHOLD;
+}
+
+/** Read live policy at selection, not a credential snapshot captured before an await. */
+export function anthropicAccountAutoSwitchThreshold(config: OcxConfig, accountId: string): number {
+  return effectiveAnthropicAccountThreshold(config, getAccountSet(PROVIDER)?.accounts.find(row => row.id === accountId));
 }
 
 /** Strict parse for management APIs — returns null instead of defaulting. */
@@ -401,8 +407,15 @@ function compareScoredAccounts(a: ScoredAccount, b: ScoredAccount): number {
 function pickLowestUsage(config: OcxConfig, excludeId: string | undefined, now: number, decision: AnthropicRouteDecision | null = null): string | null {
   const window = anthropicQuotaWindow(anthropicAccountPoolConfig(config));
   const unfiltered = routeCandidates(getEligibleAnthropicAccounts(now), decision).filter(id => id !== excludeId);
-  const available = window === "weekly" ? unfiltered.filter(id => !exhausted5h(id)) : unfiltered;
-  const eligible = available.length > 0 ? available : unfiltered;
+  const available = window === "weekly" ? unfiltered.filter(id => !exhausted5h(id)
+    || isAnthropicAccountPoolEnabled(config) && anthropicAccountAutoSwitchThreshold(config, id) === 0) : unfiltered;
+  const availableOrFallback = available.length > 0 ? available : unfiltered;
+  // Thresholds are preferences, never eligibility. Keep the old lowest-usage fallback
+  // when every candidate is drained, and keep pool-off reactive recovery policy inert.
+  const hasKnownUnderThreshold = isAnthropicAccountPoolEnabled(config)
+    && availableOrFallback.some(id => hasKnownUsage(config, id) && isActiveUnderFillFirstThreshold(config, id));
+  const eligible = hasKnownUnderThreshold
+    ? availableOrFallback.filter(id => isActiveUnderFillFirstThreshold(config, id)) : availableOrFallback;
   if (eligible.length === 0) return null;
   const scored: ScoredAccount[] = eligible.map(accountId => ({
     accountId,
@@ -435,7 +448,8 @@ function pickNextFillFirstAnthropicAccount(
   decision: AnthropicRouteDecision | null,
 ): string | null {
   const window = anthropicQuotaWindow(anthropicAccountPoolConfig(config));
-  const available = window === "weekly" ? eligible.filter(id => !exhausted5h(id)) : eligible;
+  const available = window === "weekly" ? eligible.filter(id => !exhausted5h(id)
+    || anthropicAccountAutoSwitchThreshold(config, id) === 0) : eligible;
   const candidates = available.length > 0 ? available : eligible;
   if (candidates.length === 0) return null;
   const routeOrder = usesDeclaredRouteOrder(eligible, decision);
@@ -517,7 +531,7 @@ function anthropicPoolStrategy(config: OcxConfig): OcxAccountPoolRotationStrateg
 }
 
 function isActiveUnderFillFirstThreshold(config: OcxConfig, accountId: string): boolean {
-  const threshold = anthropicAutoSwitchThreshold(config);
+  const threshold = anthropicAccountAutoSwitchThreshold(config, accountId);
   if (threshold <= 0) return true;
   const window = anthropicQuotaWindow(anthropicAccountPoolConfig(config));
   if (window === "weekly" && exhausted5h(accountId)) return false;
@@ -676,7 +690,7 @@ export function resolveAnthropicAccountForSession(
     return { accountId: strategyPick.accountId, reason: strategyPick.reason, routePosition: decision?.position };
   }
 
-  const threshold = anthropicAutoSwitchThreshold(config);
+  const threshold = anthropicAccountAutoSwitchThreshold(config, set.activeAccountId);
   const activeOk = set.accounts.some(a => a.id === set.activeAccountId && a.needsReauth !== true)
     && !isCooled(set.activeAccountId, now)
     && eligible.includes(set.activeAccountId);

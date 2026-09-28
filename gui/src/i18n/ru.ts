@@ -4,6 +4,7 @@ import type { TKey } from "./en";
  * Russian i18n catalog; must match the `TKey` set (compile-checked).
  */
 export const ru: Record<TKey, string> = {
+  "pws.anthropicAccountThresholdHint": "Переопределяет порог пула Claude. 0 отключает переключение по использованию; пауза и восстановление после ограничения запросов сохраняются.",
   "kiroLogin.title": "Войти в Kiro",
   "kiroLogin.chooseMethod": "Выберите способ входа",
   "kiroLogin.cli": "Импортировать через Kiro CLI",

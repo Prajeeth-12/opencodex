@@ -6,6 +6,7 @@ import type { TKey } from "./en";
  * Technical terms and model identifiers intentionally remain English.
  */
 export const vi: Record<TKey, string> = {
+  "pws.anthropicAccountThresholdHint": "Ghi đè ngưỡng mặc định của nhóm Claude. 0 tắt chuyển đổi theo mức sử dụng; tạm dừng và khôi phục khi bị giới hạn vẫn áp dụng.",
   "kiroLogin.title": "Đăng nhập Kiro",
   "kiroLogin.chooseMethod": "Chọn cách đăng nhập",
   "kiroLogin.cli": "Nhập từ Kiro CLI",

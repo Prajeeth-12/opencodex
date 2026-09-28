@@ -3,12 +3,13 @@
  * embedding for the workspace Settings tab (WP091). Consumes WP040+WP060
  * handlers via props-down; no internal auth machinery.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "../../i18n/shared";
 import { IconLock, IconRefresh, IconTrash } from "../../icons";
 import type { WorkspaceItem } from "../../provider-workspace/catalog";
 import { oauthAccountDisplayLabel, providerAuthSurface } from "../../provider-workspace/auth";
 import { displayAccountId } from "../../lib/privacy";
+import AccountAutoSwitchControl from "../AccountAutoSwitchControl";
 import {
   formatOAuthHealthLabel,
   formatOAuthHealthSummary,
@@ -208,6 +209,10 @@ export default function ProviderAuthPanel({
     else void authHandlers?.onLogin(item.name, addAccount);
   };
   const [newKey, setNewKey] = useState("");
+  // The settings card can save a new default before the account roster refreshes.
+  // Only confirmed server values seed a new override; keep dirty custom drafts unchanged.
+  const [poolThreshold, setPoolThreshold] = useState<{ apiBase: string; value: number } | null>(null);
+  const onPoolThresholdChange = useCallback((value: number) => setPoolThreshold({ apiBase, value }), [apiBase]);
   const [keyBusy, setKeyBusy] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [importStatus, setImportStatus] = useState<"idle" | "invalid" | "failed" | "complete">("idle");
@@ -428,7 +433,7 @@ export default function ProviderAuthPanel({
         {isOauth && (
           <>
             {item.name === "anthropic" && (
-              <AnthropicAccountPoolSettings apiBase={apiBase} accountCount={accounts.length} />
+              <AnthropicAccountPoolSettings apiBase={apiBase} accountCount={accounts.length} onThresholdChange={onPoolThresholdChange} />
             )}
             {item.name === "google-antigravity" && (
               <div className="pwi-auth-add-key">
@@ -621,6 +626,16 @@ export default function ProviderAuthPanel({
                     </button>
                     </div>
                     <div className="pwi-auth-acct-quota">
+                      {item.name === "anthropic" && account.autoSwitchThresholdOverride !== undefined
+                        && account.autoSwitchThreshold !== undefined && authHandlers.onAccountThreshold && (
+                        <AccountAutoSwitchControl
+                          accountLabel={label} inputId={`anthropic-threshold-${account.id}`}
+                          globalThreshold={poolThreshold?.apiBase === apiBase ? poolThreshold.value : account.autoSwitchThreshold} override={account.autoSwitchThresholdOverride}
+                          hintText={t("pws.anthropicAccountThresholdHint")}
+                          disabled={busy || Boolean(switchingAccountId) || Boolean(pausingAccountId)}
+                          onChange={threshold => authHandlers.onAccountThreshold!(item.name, account, threshold)}
+                        />
+                      )}
                       <ProviderAccountQuota quotaMode={account.quotaMode} quota={account.quota}
                         quotaUnavailable={account.quotaUnavailable} quotaPending={account.quotaPending} quotaFailure={account.quotaFailure} />
                     </div>

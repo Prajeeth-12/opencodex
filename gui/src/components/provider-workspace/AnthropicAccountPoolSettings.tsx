@@ -37,9 +37,11 @@ type PoolState = {
 export default function AnthropicAccountPoolSettings({
   apiBase,
   accountCount,
+  onThresholdChange,
 }: {
   apiBase: string;
   accountCount: number;
+  onThresholdChange?: (threshold: number) => void;
 }) {
   const t = useT();
   const [state, setState] = useState<PoolState | null>(null);
@@ -79,6 +81,7 @@ export default function AnthropicAccountPoolSettings({
           quotaWindow: normalizeAccountPoolQuotaWindow(json.quotaWindow),
         });
         setDraft(String(nextThreshold));
+        onThresholdChange?.(nextThreshold);
         setStickyDraft(String(nextSticky));
         setLoadError(false);
       })
@@ -90,7 +93,7 @@ export default function AnthropicAccountPoolSettings({
       cancelled = true;
       ac.abort();
     };
-  }, [apiBase]);
+  }, [apiBase, onThresholdChange]);
 
   const save = useCallback(async (next: {
     enabled: boolean;
@@ -120,17 +123,19 @@ export default function AnthropicAccountPoolSettings({
         quotaWindow: next.quotaWindow,
       });
       if (!json) throw new Error("save");
+      const savedThreshold = typeof json.autoSwitchThreshold === "number" ? json.autoSwitchThreshold : next.threshold;
       const savedStrategy = normalizeAccountPoolStrategy(json?.strategy ?? next.strategy);
       const savedSticky = normalizeAccountPoolStickyLimit(json?.stickyLimit ?? next.stickyLimit);
       const savedWindow = normalizeAccountPoolQuotaWindow(json?.quotaWindow ?? next.quotaWindow);
       setState({
         enabled: next.enabled,
-        threshold: next.threshold,
+        threshold: savedThreshold,
         strategy: savedStrategy,
         stickyLimit: savedSticky,
         quotaWindow: savedWindow,
       });
-      setDraft(String(next.threshold));
+      setDraft(String(savedThreshold));
+      onThresholdChange?.(savedThreshold);
       setStickyDraft(String(savedSticky));
     } catch {
       setError(t("anthropicPool.saveFailed"));
@@ -142,7 +147,7 @@ export default function AnthropicAccountPoolSettings({
     } finally {
       setSaving(false);
     }
-  }, [apiBase, state, t]);
+  }, [apiBase, state, t, onThresholdChange]);
 
   const enabled = state?.enabled === true;
   const threshold = state?.threshold ?? 80;

@@ -54,6 +54,36 @@ afterEach(async () => {
   }
 });
 
+test("confirmed threshold persists in UI when follow-up read fails; failed writes preserve prior state", async () => {
+  let fail = false; const bodies: unknown[] = [];
+  respond = async (_url, init) => {
+    if (init?.method !== "PUT") return new Response(null, { status: 503 });
+    bodies.push(JSON.parse(String(init.body)));
+    return fail ? new Response(null, { status: 500 }) : Response.json({ autoSwitchThresholdOverride: 0, autoSwitchThreshold: 70, effectiveAutoSwitchThreshold: 0 });
+  };
+  await act(async () => { expect(await pools.setAccountThreshold("fixture", row("b", false), 0)).toBe(true); });
+  expect(pools.accountSets.fixture.accounts[1]?.autoSwitchThresholdOverride).toBe(0);
+  expect(bodies[0]).toEqual({ provider: "fixture", accountId: "b", threshold: 0 });
+  fail = true;
+  await act(async () => { expect(await pools.setAccountThreshold("fixture", row("b", false), null)).toBe(false); });
+  expect(pools.accountSets.fixture.accounts[1]?.autoSwitchThresholdOverride).toBe(0);
+  expect(notices.some(notice => notice.key === "accountPool.autoSwitchUpdateFailed")).toBe(true);
+});
+
+test("pending threshold owns its roster generation and blocks conflicting pause", async () => {
+  let settle!: (response: Response) => void; let writes = 0;
+  respond = async (_url, init) => {
+    if (init?.method !== "PUT") return new Response(null, { status: 503 });
+    writes++; return new Promise(resolve => { settle = resolve; });
+  };
+  let pending!: Promise<boolean>;
+  await act(async () => { pending = pools.setAccountThreshold("fixture", row("b", false), 40); });
+  await act(async () => { await pools.pauseAccount("fixture", row("b", false), true); });
+  expect(writes).toBe(1);
+  await act(async () => { settle(Response.json({ autoSwitchThresholdOverride: 40, autoSwitchThreshold: 70, effectiveAutoSwitchThreshold: 40 })); await pending; });
+  expect(pools.accountSets.fixture.accounts[1]?.autoSwitchThresholdOverride).toBe(40);
+});
+
 test("a saved pause stays visible and only the failed roster refresh is reported", async () => {
   respond = async (_url, init) => init?.method === "PUT"
     ? Response.json({ ok: true, activeAccountId: "a", activeAccountChanged: false })
@@ -86,4 +116,3 @@ test("a rejected save reports the pause failure and leaves the row unpaused", as
   expect(pools.accountSets.fixture.accounts.find(account => account.id === "b")?.paused).toBe(false);
   expect(notices).toEqual([{ key: "codexAuth.pauseFailed", ok: false }]);
 });
-
