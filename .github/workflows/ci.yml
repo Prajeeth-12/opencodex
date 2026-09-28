@@ -261,6 +261,7 @@ jobs:
               - 'src/service/**'
               - 'src/cli/index.ts'
               - 'src/lib/bun-runtime.ts'
+              - 'src/lib/standalone.ts'
               - 'src/lib/keyring-native.ts'
               - 'scripts/build-standalone.ts'
               - 'scripts/standalone-keyring.ts'
@@ -1464,6 +1465,12 @@ jobs:
           cp -a "$APPIMAGE_BUNDLE/." "$BUNDLE_ROOT/appimage/"
           cp -a "$DEB_BUNDLE/." "$BUNDLE_ROOT/deb/"
           chmod -R a-w "$BUNDLE_ROOT"
+
+      - name: Verify packaged Linux sidecar keyring
+        if: needs.changes.outputs.desktop == 'true'
+        env:
+          BUNDLE_ROOT: ${{ runner.temp }}/opencodex-linux-bundles
+        run: bash desktop/scripts/verify-linux-sidecar.sh "$BUNDLE_ROOT/appimage"
 
       - name: Run Linux packaged-shell E2E
         if: needs.changes.outputs.desktop == 'true'

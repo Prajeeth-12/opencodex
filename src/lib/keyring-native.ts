@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { isStandaloneBinary, standaloneRoot } from "./standalone";
 
 export interface KeyringBinding {
   Entry: new (service: string, account: string) => unknown;
@@ -11,6 +12,9 @@ export interface KeyringNativeAsset {
   packageName: string;
   filename: string;
 }
+
+/** Must match Tauri `productName`, which names Linux's usr/lib resource directory. */
+export const PACKAGED_DESKTOP_PRODUCT_NAME = "OpenCodex";
 
 const ASSET_BY_TARGET: Readonly<Record<string, KeyringNativeAsset>> = {
   "bun-darwin-arm64": {
@@ -56,18 +60,31 @@ function runtimeAsset(platform: NodeJS.Platform, arch: string): KeyringNativeAss
  * arbitrary directory, and loading a same-named native file from there would turn cwd into code.
  */
 export function packagedKeyringCandidates({
-  executable = process.execPath,
+  root = isStandaloneBinary() ? standaloneRoot() : undefined,
   platform = process.platform,
   arch = process.arch,
 }: {
-  executable?: string;
+  /** Test seam; production supplies the canonical compiled-executable directory. */
+  root?: string;
   platform?: NodeJS.Platform;
   arch?: string;
 } = {}): string[] {
+  // Source/npm installs must stay inside package resolution. Probing beside a shared Bun/Node
+  // executable would expand the native-code trust boundary and contradict the packaging contract.
+  if (root === undefined) return [];
   const asset = runtimeAsset(platform, arch);
   if (!asset) return [];
-  const executableDir = dirname(resolve(executable));
+  const executableDir = resolve(root);
   const adjacent = join(executableDir, "keyring", asset.filename);
+  if (platform === "linux") {
+    const usrDir = dirname(executableDir);
+    // Tauri installs resources at usr/lib/<productName> while its sidecar is usr/bin/ocx.
+    // Restrict that fallback to the exact bundle shape; ordinary standalone archives keep the
+    // executable-owned adjacent directory as their only candidate.
+    return basename(executableDir) === "bin" && basename(usrDir) === "usr"
+      ? [adjacent, join(usrDir, "lib", PACKAGED_DESKTOP_PRODUCT_NAME, "keyring", asset.filename)]
+      : [adjacent];
+  }
   if (platform !== "darwin") return [adjacent];
   return [
     // Prefer the executable-owned sibling. A standalone layout must not let an unrelated

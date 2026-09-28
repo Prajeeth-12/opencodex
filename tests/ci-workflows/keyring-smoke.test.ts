@@ -8,6 +8,7 @@ import {
   keyringAssetForStandaloneTarget,
   inspectKeyringBinding,
   loadKeyringBinding,
+  PACKAGED_DESKTOP_PRODUCT_NAME,
   packagedKeyringCandidates,
   type KeyringBinding,
 } from "../../src/lib/keyring-native";
@@ -170,15 +171,32 @@ describe("packaged keyring native binding", () => {
     expect(keyringAssetForStandaloneTarget("bun-freebsd-x64")).toBeUndefined();
   });
 
+  test("source installs use package resolution instead of probing beside Bun", () => {
+    expect(packagedKeyringCandidates()).toEqual([]);
+  });
+
   test("prefers the standalone-adjacent addon before a macOS app resource", () => {
     expect(packagedKeyringCandidates({
-      executable: "/Applications/OpenCodex.app/Contents/MacOS/ocx",
+      root: "/Applications/OpenCodex.app/Contents/MacOS",
       platform: "darwin",
       arch: "arm64",
     })).toEqual([
       "/Applications/OpenCodex.app/Contents/MacOS/keyring/keyring.darwin-arm64.node",
       "/Applications/OpenCodex.app/Contents/Resources/keyring/keyring.darwin-arm64.node",
     ]);
+  });
+
+  test("finds the Linux Tauri resource only for an usr/bin sidecar layout", () => {
+    expect(packagedKeyringCandidates({
+      root: "/tmp/.mount-OpenCodex/usr/bin",
+      platform: "linux",
+      arch: "x64",
+    })).toEqual([
+      "/tmp/.mount-OpenCodex/usr/bin/keyring/keyring.linux-x64-gnu.node",
+      "/tmp/.mount-OpenCodex/usr/lib/OpenCodex/keyring/keyring.linux-x64-gnu.node",
+    ]);
+    expect(packagedKeyringCandidates({ root: "/opt/ocx", platform: "linux", arch: "x64" }))
+      .toEqual(["/opt/ocx/keyring/keyring.linux-x64-gnu.node"]);
   });
 
   test("loads only an existing deterministic packaged path and never consults cwd", () => {
@@ -237,6 +255,7 @@ describe("packaged keyring native binding", () => {
 
   test("desktop and release packaging retain the external addon and packaged-app proof", () => {
     const config = JSON.parse(readFileSync(repoPath("desktop", "src-tauri", "tauri.conf.json"), "utf8"));
+    expect(config.productName).toBe(PACKAGED_DESKTOP_PRODUCT_NAME);
     expect(config.bundle.resources["resources/keyring"]).toBe("keyring");
     const release = readFileSync(repoPath(".github", "workflows", "release.yml"), "utf8");
     expect(release).toContain("ocx.exe,gui,keyring");
@@ -246,10 +265,17 @@ describe("packaged keyring native binding", () => {
     expect(release).toContain("Verify the packaged universal macOS runtime");
     expect(release).toContain("keyring.darwin-arm64.node");
     expect(release).toContain("keyring.darwin-x64.node");
+    const ci = readFileSync(repoPath(".github", "workflows", "ci.yml"), "utf8");
+    expect(ci).toContain("src/lib/standalone.ts");
+    expect(ci).toContain("Verify packaged Linux sidecar keyring");
+    expect(ci).toContain('bash desktop/scripts/verify-linux-sidecar.sh "$BUNDLE_ROOT/appimage"');
     const verify = readFileSync(repoPath("desktop", "scripts", "verify-macos-runtime.sh"), "utf8");
     expect(verify).toContain("cwd=work");
     expect(verify).toContain('"__keyring-load-check"');
     expect(verify).toContain('"schema": "ocx-keyring-load/1"');
+    const verifyLinux = readFileSync(repoPath("desktop", "scripts", "verify-linux-sidecar.sh"), "utf8");
+    expect(verifyLinux).toContain("usr/lib/OpenCodex/keyring/keyring.linux-x64-gnu.node");
+    expect(verifyLinux).toContain("__keyring-load-check");
     const cli = readFileSync(repoPath("src", "cli", "index.ts"), "utf8");
     expect(cli).toContain('process.argv[2] === "__keyring-load-check"');
   });

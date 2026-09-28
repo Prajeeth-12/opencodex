@@ -48,6 +48,10 @@ describe("Linux packaged desktop E2E in CI", () => {
     expect(stage?.run).toContain("$APPIMAGE_BUNDLE/.");
     expect(stage?.run).toContain("$DEB_BUNDLE/.");
     expect(stage?.run).toContain('chmod -R a-w "$BUNDLE_ROOT"');
+    const verifyKeyring = shell?.steps?.find(step => step.name === "Verify packaged Linux sidecar keyring");
+    expect(verifyKeyring?.if).toBe("needs.changes.outputs.desktop == 'true'");
+    expect(verifyKeyring?.env?.BUNDLE_ROOT).toContain("opencodex-linux-bundles");
+    expect(verifyKeyring?.run).toBe('bash desktop/scripts/verify-linux-sidecar.sh "$BUNDLE_ROOT/appimage"');
 
     const aggregate = workflow.jobs?.ci?.steps?.find(step => step.name === "Assert every job this event requested succeeded");
     expect(aggregate?.env?.CHANGES_DESKTOP).toBe("${{ needs.changes.outputs.desktop }}");

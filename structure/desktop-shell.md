@@ -369,13 +369,21 @@ copies that directory into Tauri resources. A universal macOS bundle carries bot
 architectures. `src/lib/keyring-native.ts` selects only the platform/architecture filename
 under `Contents/Resources/keyring` (or an adjacent standalone `keyring/` directory); it never
 searches the launch working directory. Source and npm installs retain ordinary package
-resolution as their fallback.
+resolution and never probe beside the shared Bun or Node executable. Compiled installs derive
+their asset root from the executable's canonical real path, so a symlinked launcher still finds
+the addon shipped with the real binary.
 
 The macOS bundle verifier launches the signed sidecar from a disposable unrelated directory and
 requires its bounded, load-only keyring probe to expose both native constructors. It does not read
 or write an OS credential, which would make an ad-hoc CI identity depend on a consent dialog.
 Release verification separately requires both Darwin architecture files inside the universal app.
 Merely finding a `.node` file in the source checkout is not sufficient evidence.
+
+Linux desktop bundles place resources under `usr/lib/OpenCodex` while the sidecar lives under
+`usr/bin`. The compiled loader recognizes only that exact bundle shape after the adjacent
+standalone directory, and the extracted-AppImage verifier executes the same bounded load-only
+probe in ordinary PR CI and release CI. This keeps source/npm runtimes and non-`usr/bin`
+standalone layouts out of the Tauri resource fallback.
 
 > Decision record: [ADR-6139](decisions/ADR-6139-packaged-native-keyring-binding.md)
 
