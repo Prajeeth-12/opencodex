@@ -92,6 +92,24 @@ test("manual, affinity and identity-less strategy priorities remain unchanged", 
   expect(resolveAnthropicAccountForSession("new", config())).toMatchObject({ accountId: a, reason: "manual" });
 });
 
+test.each(["active", "non-active"] as const)("%s threshold edits preserve the pending manual dispatch", async target => {
+  const [a, b, c] = ids;
+  quota(a, 90); quota(b, 10); quota(c, 70);
+  await setActiveAccount("anthropic", a);
+  resetAnthropicRoutingForManualSelection(a);
+
+  await setAnthropicAccountThreshold(target === "active" ? a : b, target === "active" ? 20 : 50);
+  const first = resolveAnthropicAccountForSession("manual-after-policy", config());
+  expect(first).toMatchObject({ accountId: a, reason: "manual" });
+  expect(await promoteAnthropicActiveAccount(a, captureOAuthAccountSelection("anthropic"), {
+    config: config(), sessionKey: "manual-after-policy", reason: first.reason,
+  })).not.toBeNull();
+
+  // The operator's one-shot intent is now consumed; the edited quota policy owns
+  // the next unbound session and moves traffic to the lower-usage account.
+  expect(resolveAnthropicAccountForSession("policy-after-manual", config())).toMatchObject({ accountId: b, reason: "lowest-usage" });
+});
+
 test("all-drained fallback remains available; zero candidate stays usable", async () => {
   const [a, b, c] = ids; quota(a, 90); quota(b, 20); quota(c, 50);
   for (const id of ids) await setAnthropicAccountThreshold(id, 10);

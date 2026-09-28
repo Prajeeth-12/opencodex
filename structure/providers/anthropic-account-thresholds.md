@@ -7,6 +7,9 @@ refresh, re-login and restart. Missing/null inherits; malformed disk values norm
 deletion and advances selection revision when policy changes. Account deletion removes it.
 `src/server/responses/request-transport.ts` re-evaluates Anthropic selection after a revision
 conflict during credential resolution, with or without a model route, before physical dispatch.
+The policy-only post-persistence signal lets a pending one-shot manual choice adopt the new
+revision when its account still owns the selection; this fences old automatic proposals without
+silently discarding operator intent. Any intervening account change still clears that choice.
 
 `src/oauth/anthropic-routing.ts` compares quota and fill-first source/candidates against each
 account's effective threshold. Zero disables usage-driven switching for that account, including

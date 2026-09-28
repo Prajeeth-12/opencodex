@@ -34,7 +34,7 @@ import type { OcxAccountPoolQuotaWindow, OcxAccountPoolRotationStrategy, OcxConf
 import { sweepExpiredOnWrite } from "../lib/state-store-sweeper";
 import { retainedUtf8Bytes } from "../lib/admission";
 import { routeCandidates, type AnthropicRouteDecision } from "./anthropic-model-routes";
-import { subscribeOAuthAccountPauseChanges } from "../lib/account-selection-events";
+import { subscribeOAuthAccountPauseChanges, subscribeOAuthAccountRoutingPolicyChanges } from "../lib/account-selection-events";
 import { effectiveAnthropicAccountThreshold } from "./anthropic-account-threshold";
 
 /**
@@ -320,6 +320,14 @@ const QUORUM_CACHE_TTL_MS = 2_000;
 let quorumCache: { value: boolean; readAt: number } | null = null;
 // Pause changes eligibility, not health. Do not reset cooldowns or cancel sent turns.
 subscribeOAuthAccountPauseChanges(provider => { if (provider === PROVIDER) quorumCache = null; });
+// A threshold write must fence in-flight automatic proposals, but it does not
+// revoke an operator's one-dispatch choice. Rebase only that still-owned choice;
+// an intervening account change clears it, so an ABA selection is not resurrected.
+subscribeOAuthAccountRoutingPolicyChanges(provider => {
+  if (provider !== PROVIDER || !manualPreference) return;
+  const current = captureOAuthAccountSelection(PROVIDER);
+  manualPreference = current?.accountId === manualPreference.accountId ? current : null;
+});
 
 /**
  * Whether a 429 has somewhere to go: two or more accounts that could serve traffic if asked.

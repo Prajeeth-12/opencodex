@@ -7,6 +7,7 @@ export type AccountSelectionEvent = {
 
 const listeners = new Set<(event: AccountSelectionEvent) => void>();
 const oauthPauseListeners = new Set<(provider: string) => void>();
+const oauthRoutingPolicyListeners = new Set<(provider: string) => void>();
 let revision = 0;
 
 /** Call only after the authoritative selection has been persisted. */
@@ -39,6 +40,22 @@ export function subscribeOAuthAccountPauseChanges(listener: (provider: string) =
   const subscription = (provider: string) => listener(provider);
   oauthPauseListeners.add(subscription);
   return () => { oauthPauseListeners.delete(subscription); };
+}
+
+/**
+ * Internal post-persistence signal for policy-only mutations that advance the
+ * selection generation without changing the operator's selected account.
+ */
+export function publishOAuthAccountRoutingPolicyChange(provider: string): void {
+  for (const listener of [...oauthRoutingPolicyListeners]) {
+    try { listener(provider); } catch { /* A process-local policy observer cannot undo persistence. */ }
+  }
+}
+
+export function subscribeOAuthAccountRoutingPolicyChanges(listener: (provider: string) => void): () => void {
+  const subscription = (provider: string) => listener(provider);
+  oauthRoutingPolicyListeners.add(subscription);
+  return () => { oauthRoutingPolicyListeners.delete(subscription); };
 }
 
 export function currentAccountSelectionRevision(): number {

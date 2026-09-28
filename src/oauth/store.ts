@@ -27,7 +27,7 @@ import { atomicWriteFileNoFollowUnclaimed } from "../config/atomic-write";
 import { assertNotRealHomeUnderTest } from "../lib/test-home-guard";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
 import { MAX_PENDING_OAUTH_MUTATIONS } from "../lib/translator-budget";
-import { publishAccountSelection, publishOAuthAccountPauseChange } from "../lib/account-selection-events";
+import { publishAccountSelection, publishOAuthAccountPauseChange, publishOAuthAccountRoutingPolicyChange } from "../lib/account-selection-events";
 import {
   captureConfigGeneration,
   type GenerationContext,
@@ -1233,16 +1233,21 @@ export async function setAnthropicAccountThreshold(accountId: string, threshold:
   if (threshold !== null && (!Number.isInteger(threshold) || threshold < 0 || threshold > 100)) {
     throw new Error("threshold must be an integer 0-100 or null");
   }
-  return mutateStore(store => {
+  const result = await mutateStore(store => {
     const set = store.anthropic;
     const account = set?.accounts.find(row => row.id === accountId);
-    if (!set || !account) return false;
-    if ((account.autoSwitchThresholdOverride ?? null) === threshold) return true;
+    if (!set || !account) return "not-found" as const;
+    if ((account.autoSwitchThresholdOverride ?? null) === threshold) return "unchanged" as const;
     if (threshold === null) delete account.autoSwitchThresholdOverride;
     else account.autoSwitchThresholdOverride = threshold;
     set.selectionRevision = randomUUID();
-    return true;
+    return "updated" as const;
   }, [accountId, threshold]);
+  // The shared revision invalidates any proposal computed with the old threshold.
+  // Tell Anthropic routing why it advanced so a still-owned one-shot manual choice
+  // can adopt the new fence instead of being mistaken for a superseded selection.
+  if (result === "updated") publishOAuthAccountRoutingPolicyChange("anthropic");
+  return result !== "not-found";
 }
 
 /** Persist an operator pause and move an active account to the next usable unpaused slot when available. */
