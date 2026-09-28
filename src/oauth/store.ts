@@ -787,7 +787,7 @@ function serializeMutation<T>(work: () => Promise<T>, retainedValues: readonly u
   drainOAuthMutations();
   return result;
 }
-export function mutateStore<T>(fn:(store:AuthStore)=>T|Promise<T>, retainedValues: readonly unknown[] = [], options?: { waitMs?: number; assertBeforePersist?: () => void; scrubLegacyBackup?: (result: T) => readonly string[]; finalizeResult?: (result: T, store: AuthStore) => void }):Promise<T>{return serializeMutation(async()=>{const guard=await createOAuthFileLock({path:getAuthStoreLockPath(),staleAfterMs:30000}).acquire();try{
+export function mutateStore<T>(fn:(store:AuthStore)=>T|Promise<T>, retainedValues: readonly unknown[] = [], options?: { waitMs?: number; assertBeforePersist?: () => void; scrubLegacyBackup?: (result: T) => readonly string[]; finalizeResult?: (result: T, store: AuthStore) => void; afterPersist?: (result: T) => void }):Promise<T>{return serializeMutation(async()=>{const guard=await createOAuthFileLock({path:getAuthStoreLockPath(),staleAfterMs:30000}).acquire();try{
     const { store, hadLegacy } = loadAuthStoreInternal();
     if (hadLegacy) backupLegacyOnce();
     const selections = new Map(Object.entries(store).map(([provider, set]) => [provider, {
@@ -825,6 +825,9 @@ export function mutateStore<T>(fn:(store:AuthStore)=>T|Promise<T>, retainedValue
     options?.finalizeResult?.(result, store);
     persist(store);
     if (scrubbedProviders.length > 0) scrubLegacyBackup(scrubbedProviders);
+    // A committed observer may establish ordering before the generic selection
+    // publication, but its failure can never turn a durable write into a reported failure.
+    try { options?.afterPersist?.(result); } catch { /* The authoritative write already committed. */ }
     for (const provider of changedProviders) publishAccountSelection(provider, "oauth");
     return result;
   }finally{guard.release();}}, retainedValues, options?.waitMs);
@@ -1229,25 +1232,35 @@ export type SetAccountPausedResult =
   | { status: "not-found" };
 
 /** Serialize policy with refresh/removal; stale pre-wait selection proposals must retry. */
-export async function setAnthropicAccountThreshold(accountId: string, threshold: number | null): Promise<boolean> {
+export async function setAnthropicAccountThreshold(
+  accountId: string,
+  threshold: number | null,
+  options: { assertBeforePersist?: () => void } = {},
+): Promise<boolean> {
   if (threshold !== null && (!Number.isInteger(threshold) || threshold < 0 || threshold > 100)) {
     throw new Error("threshold must be an integer 0-100 or null");
   }
   const result = await mutateStore(store => {
     const set = store.anthropic;
     const account = set?.accounts.find(row => row.id === accountId);
-    if (!set || !account) return "not-found" as const;
-    if ((account.autoSwitchThresholdOverride ?? null) === threshold) return "unchanged" as const;
+    if (!set || !account) return { status: "not-found" as const };
+    if ((account.autoSwitchThresholdOverride ?? null) === threshold) return { status: "unchanged" as const };
+    const before = accountSelection(set);
     if (threshold === null) delete account.autoSwitchThresholdOverride;
     else account.autoSwitchThresholdOverride = threshold;
     set.selectionRevision = randomUUID();
-    return "updated" as const;
-  }, [accountId, threshold]);
-  // The shared revision invalidates any proposal computed with the old threshold.
-  // Tell Anthropic routing why it advanced so a still-owned one-shot manual choice
-  // can adopt the new fence instead of being mistaken for a superseded selection.
-  if (result === "updated") publishOAuthAccountRoutingPolicyChange("anthropic");
-  return result !== "not-found";
+    return { status: "updated" as const, before, after: accountSelection(set) };
+  }, [accountId, threshold], { assertBeforePersist: options.assertBeforePersist, afterPersist: result => {
+    if (result.status !== "updated") return;
+    // Publish the policy-owned transition before the generic selection event. This
+    // preserves an exact previous-revision manual intent without opening an ABA gap.
+    publishOAuthAccountRoutingPolicyChange(Object.freeze({
+      provider: "anthropic",
+      before: Object.freeze(result.before),
+      after: Object.freeze(result.after),
+    }));
+  } });
+  return result.status !== "not-found";
 }
 
 /** Persist an operator pause and move an active account to the next usable unpaused slot when available. */

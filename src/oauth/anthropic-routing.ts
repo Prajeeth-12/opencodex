@@ -34,7 +34,7 @@ import type { OcxAccountPoolQuotaWindow, OcxAccountPoolRotationStrategy, OcxConf
 import { sweepExpiredOnWrite } from "../lib/state-store-sweeper";
 import { retainedUtf8Bytes } from "../lib/admission";
 import { routeCandidates, type AnthropicRouteDecision } from "./anthropic-model-routes";
-import { subscribeOAuthAccountPauseChanges, subscribeOAuthAccountRoutingPolicyChanges } from "../lib/account-selection-events";
+import { subscribeAccountSelections, subscribeOAuthAccountPauseChanges, subscribeOAuthAccountRoutingPolicyChanges } from "../lib/account-selection-events";
 import { effectiveAnthropicAccountThreshold } from "./anthropic-account-threshold";
 
 /**
@@ -323,10 +323,19 @@ subscribeOAuthAccountPauseChanges(provider => { if (provider === PROVIDER) quoru
 // A threshold write must fence in-flight automatic proposals, but it does not
 // revoke an operator's one-dispatch choice. Rebase only that still-owned choice;
 // an intervening account change clears it, so an ABA selection is not resurrected.
-subscribeOAuthAccountRoutingPolicyChanges(provider => {
-  if (provider !== PROVIDER || !manualPreference) return;
+subscribeOAuthAccountRoutingPolicyChanges(event => {
+  if (event.provider !== PROVIDER || !manualPreference) return;
+  if (manualPreference.accountId !== event.before.accountId
+    || manualPreference.revision !== event.before.revision) return;
+  manualPreference = event.after.accountId === manualPreference.accountId ? { ...event.after } : null;
+});
+// Any non-policy selection generation supersedes the pending one-shot choice.
+// Threshold mutations rebase it first, before this generic notification runs.
+subscribeAccountSelections(event => {
+  if (event.provider !== PROVIDER || event.kind !== "oauth" || !manualPreference) return;
   const current = captureOAuthAccountSelection(PROVIDER);
-  manualPreference = current?.accountId === manualPreference.accountId ? current : null;
+  if (current?.accountId !== manualPreference.accountId
+    || current.revision !== manualPreference.revision) manualPreference = null;
 });
 
 /**

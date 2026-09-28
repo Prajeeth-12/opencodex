@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clearPoolRotationState } from "../../../src/codex/pool-rotation";
+import { subscribeAccountSelections } from "../../../src/lib/account-selection-events";
 import { effectiveAnthropicAccountThreshold, parseAnthropicAccountThreshold } from "../../../src/oauth/anthropic-account-threshold";
 import { bindAnthropicSessionAffinity, clearAnthropicAccountPoolState, promoteAnthropicActiveAccount,
   resetAnthropicRoutingForManualSelection, resolveAnthropicAccountForSession, rotateAnthropicAccountOn429 } from "../../../src/oauth/anthropic-routing";
@@ -108,6 +109,80 @@ test.each(["active", "non-active"] as const)("%s threshold edits preserve the pe
   // The operator's one-shot intent is now consumed; the edited quota policy owns
   // the next unbound session and moves traffic to the lower-usage account.
   expect(resolveAnthropicAccountForSession("policy-after-manual", config())).toMatchObject({ accountId: b, reason: "lowest-usage" });
+});
+
+test("policy ownership is visible before the generic selection event", async () => {
+  const [a, b, c] = ids;
+  quota(a, 90); quota(b, 10); quota(c, 70);
+  await setActiveAccount("anthropic", a);
+  resetAnthropicRoutingForManualSelection(a);
+  const observed: ReturnType<typeof resolveAnthropicAccountForSession>[] = [];
+  const unsubscribe = subscribeAccountSelections(event => {
+    if (event.provider === "anthropic" && event.kind === "oauth") {
+      observed.push(resolveAnthropicAccountForSession("inside-selection-event", config()));
+    }
+  });
+  try {
+    await setAnthropicAccountThreshold(b, 50);
+  } finally {
+    unsubscribe();
+  }
+  expect(observed).toEqual([expect.objectContaining({ accountId: a, reason: "manual" })]);
+  expect(resolveAnthropicAccountForSession("after-selection-event", config())).toMatchObject({ accountId: a, reason: "manual" });
+});
+
+test.each(["aba", "same-id"] as const)("ordinary %s revisions cannot be adopted by a later policy event", async transition => {
+  const [a, b, c] = ids;
+  quota(a, 90); quota(b, 10); quota(c, 70);
+  await setActiveAccount("anthropic", a);
+  resetAnthropicRoutingForManualSelection(a);
+  if (transition === "aba") await setActiveAccount("anthropic", b);
+  await setActiveAccount("anthropic", a);
+  await setAnthropicAccountThreshold(b, 50);
+  expect(resolveAnthropicAccountForSession(`after-${transition}`, config())).toMatchObject({ accountId: b, reason: "lowest-usage" });
+});
+
+test("a consumed manual choice stays consumed across successive policy edits", async () => {
+  const [a, b, c] = ids;
+  quota(a, 90); quota(b, 10); quota(c, 70);
+  await setActiveAccount("anthropic", a);
+  resetAnthropicRoutingForManualSelection(a);
+  const manual = resolveAnthropicAccountForSession("consume-before-policy", config());
+  expect(manual).toMatchObject({ accountId: a, reason: "manual" });
+  expect(await promoteAnthropicActiveAccount(a, captureOAuthAccountSelection("anthropic"), {
+    config: config(), sessionKey: "consume-before-policy", reason: manual.reason,
+  })).not.toBeNull();
+  await setAnthropicAccountThreshold(b, 50);
+  await setAnthropicAccountThreshold(c, 60);
+  expect(resolveAnthropicAccountForSession("after-consumed-policy", config())).toMatchObject({ accountId: b, reason: "lowest-usage" });
+});
+
+test("a rejected policy persistence neither advances selection nor consumes manual intent", async () => {
+  const [a, b, c] = ids;
+  quota(a, 90); quota(b, 10); quota(c, 70);
+  await setActiveAccount("anthropic", a);
+  resetAnthropicRoutingForManualSelection(a);
+  const before = captureOAuthAccountSelection("anthropic");
+  await expect(setAnthropicAccountThreshold(b, 50, {
+    assertBeforePersist: () => { throw new Error("synthetic threshold persist refusal"); },
+  })).rejects.toThrow("synthetic threshold persist refusal");
+  expect(captureOAuthAccountSelection("anthropic")).toEqual(before);
+  expect(resolveAnthropicAccountForSession("after-rejected-policy", config())).toMatchObject({ accountId: a, reason: "manual" });
+});
+
+test("successive policy revisions preserve the current manual choice exactly once", async () => {
+  const [a, b, c] = ids;
+  quota(a, 90); quota(b, 10); quota(c, 70);
+  await setActiveAccount("anthropic", a);
+  resetAnthropicRoutingForManualSelection(a);
+  await setAnthropicAccountThreshold(b, 50);
+  await setAnthropicAccountThreshold(c, 60);
+  const manual = resolveAnthropicAccountForSession("after-two-policies", config());
+  expect(manual).toMatchObject({ accountId: a, reason: "manual" });
+  expect(await promoteAnthropicActiveAccount(a, captureOAuthAccountSelection("anthropic"), {
+    config: config(), sessionKey: "after-two-policies", reason: manual.reason,
+  })).not.toBeNull();
+  expect(resolveAnthropicAccountForSession("after-two-policies-consumed", config())).toMatchObject({ accountId: b, reason: "lowest-usage" });
 });
 
 test("all-drained fallback remains available; zero candidate stays usable", async () => {

@@ -16,9 +16,10 @@
   Missing/null inherits the current Anthropic pool default; validate integer 0..100, retaining
   concrete zero as usage-driven switching disabled. The auth mutation lock bumps selection
   revision on changes, rejecting old admission proposals without touching credentials or health.
-  A post-persistence policy event rebases only a still-owned one-shot manual preference onto that
-  new fence; an intervening account change clears the preference instead. Re-login and refresh
-  preserve metadata; account/provider deletion owns cleanup.
+  A post-persistence policy event carries the exact previous/current selection revisions and runs
+  before the generic selection publication. It rebases only a one-shot manual preference that
+  still owns the previous revision; every ordinary selection generation clears stale ownership,
+  including A→B→A. Re-login and refresh preserve metadata; account/provider deletion owns cleanup.
 - Why this approach: One account-owned record provides atomic lifetime and restart persistence.
   The existing cache remains the freshness/unknown authority. Known below-threshold candidates
   are preferred using their own policy, but usage never makes an account ineligible.
@@ -36,6 +37,7 @@
 
 Focused tests cover every strategy/window, zero/inheritance, unknown/reset-expired quotas,
 route scope, pool-off recovery, generation invalidation, active and non-active policy edits after
-a manual selection, refresh/pause races, restart and deletion in
+a manual selection, observer ordering, A→B→A and same-id generations, rejected persistence,
+successive policy edits, refresh/pause races, restart and deletion in
 `tests/adapters/anthropic/anthropic-account-threshold.test.ts`. CLI and mounted GUI tests verify
 surface parity. Validation uses isolated homes, not the live proxy.
