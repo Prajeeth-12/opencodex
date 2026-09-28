@@ -34,6 +34,7 @@ import {
 } from "../lib/state-store-sweeper";
 import { validateCopilotApiBaseUrl } from "./github-copilot";
 import { validateDevinApiBaseUrl } from "./devin/api-base";
+import { parseAnthropicAccountThreshold } from "./anthropic-account-threshold";
 import type { OAuthAccountSelection, OAuthCredentialSource, OAuthCredentials, ProviderAccount, ProviderAccountSet } from "./types";
 
 export type AuthStore = Record<string, ProviderAccountSet>;
@@ -626,10 +627,8 @@ function normalizeAccount(value: unknown): ProviderAccount | null {
   if (typeof candidate.alias === "string" && candidate.alias.trim()) account.alias = candidate.alias.trim();
   if (candidate.needsReauth === true) account.needsReauth = true;
   if (candidate.paused === true) account.paused = true;
-  if (typeof candidate.autoSwitchThresholdOverride === "number" && Number.isInteger(candidate.autoSwitchThresholdOverride)
-    && candidate.autoSwitchThresholdOverride >= 0 && candidate.autoSwitchThresholdOverride <= 100) {
-    account.autoSwitchThresholdOverride = candidate.autoSwitchThresholdOverride;
-  }
+  const threshold = parseAnthropicAccountThreshold(candidate.autoSwitchThresholdOverride);
+  if (threshold !== null) account.autoSwitchThresholdOverride = threshold;
   if (typeof candidate.addedAt === "number") account.addedAt = candidate.addedAt;
   if (typeof candidate.loginId === "string"
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate.loginId)) {
@@ -1237,20 +1236,21 @@ export async function setAnthropicAccountThreshold(
   threshold: number | null,
   options: { assertBeforePersist?: () => void } = {},
 ): Promise<boolean> {
-  if (threshold !== null && (!Number.isInteger(threshold) || threshold < 0 || threshold > 100)) {
+  const normalizedThreshold = threshold === null ? null : parseAnthropicAccountThreshold(threshold);
+  if (threshold !== null && normalizedThreshold === null) {
     throw new Error("threshold must be an integer 0-100 or null");
   }
   const result = await mutateStore(store => {
     const set = store.anthropic;
     const account = set?.accounts.find(row => row.id === accountId);
     if (!set || !account) return { status: "not-found" as const };
-    if ((account.autoSwitchThresholdOverride ?? null) === threshold) return { status: "unchanged" as const };
+    if ((account.autoSwitchThresholdOverride ?? null) === normalizedThreshold) return { status: "unchanged" as const };
     const before = accountSelection(set);
-    if (threshold === null) delete account.autoSwitchThresholdOverride;
-    else account.autoSwitchThresholdOverride = threshold;
+    if (normalizedThreshold === null) delete account.autoSwitchThresholdOverride;
+    else account.autoSwitchThresholdOverride = normalizedThreshold;
     set.selectionRevision = randomUUID();
     return { status: "updated" as const, before, after: accountSelection(set) };
-  }, [accountId, threshold], { assertBeforePersist: options.assertBeforePersist, afterPersist: result => {
+  }, [accountId, normalizedThreshold], { assertBeforePersist: options.assertBeforePersist, afterPersist: result => {
     if (result.status !== "updated") return;
     // Publish the policy-owned transition before the generic selection event. This
     // preserves an exact previous-revision manual intent without opening an ABA gap.

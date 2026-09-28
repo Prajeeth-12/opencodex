@@ -13,6 +13,11 @@ it still owns the previous one; this fences old automatic proposals without sile
 operator intent. Ordinary selection publications clear stale ownership, including A→B→A and
 same-account revision replacement.
 
+Management reads and writes resolve Anthropic OAuth eligibility through the same configured-or-
+built-in provider definition, so a separately persisted account store remains editable when the
+explicit provider row is absent. A successful write returns its validated committed override and
+derived effective value directly; it never re-reads a newer concurrent mutation into the response.
+
 `src/oauth/anthropic-routing.ts` compares quota and fill-first source/candidates against each
 account's effective threshold. Zero disables usage-driven switching for that account, including
 the weekly five-hour exhaustion guard. Unknown source usage does not force a switch. Existing

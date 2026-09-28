@@ -28,8 +28,11 @@
 - Benefits, tradeoffs, and impact: No config migration or additional secret store. Account DTOs
   expose override/default/effective values without credentials. The dedicated PUT, explicit CLI
   `--account` and reused compact card control share the contract. Same-provider mutation ownership
-  and roster generations protect GUI reads; focus/draft behavior uses existing React components
-  with a localized Anthropic hint. Additional auth-store reads occur at selection boundaries.
+  and roster generations protect GUI reads. GET and PUT both use the built-in Anthropic OAuth
+  definition when the explicit provider row is absent, and each PUT response projects the value
+  committed by that request instead of re-reading a later concurrent write. Focus/draft behavior
+  uses existing React components with a localized Anthropic hint. Additional auth-store reads occur
+  at selection boundaries.
   Thresholds are soft preferences, not spend caps; admitted/sent requests are not cancelled.
   This TypeScript `dev` slice needs maintainer assessment/port to `dev2-go` at integration.
 
