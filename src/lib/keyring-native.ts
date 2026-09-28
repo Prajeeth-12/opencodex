@@ -70,10 +70,11 @@ export function packagedKeyringCandidates({
   const adjacent = join(executableDir, "keyring", asset.filename);
   if (platform !== "darwin") return [adjacent];
   return [
+    // Prefer the executable-owned sibling. A standalone layout must not let an unrelated
+    // app-shaped ../Resources tree override the addon distributed with that executable.
+    adjacent,
     // Tauri resources live in Contents/Resources while its external binary lives in Contents/MacOS.
     join(executableDir, "..", "Resources", "keyring", asset.filename),
-    // Standalone archives keep the addon beside the executable in keyring/.
-    adjacent,
   ];
 }
 

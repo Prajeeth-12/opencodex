@@ -170,14 +170,14 @@ describe("packaged keyring native binding", () => {
     expect(keyringAssetForStandaloneTarget("bun-freebsd-x64")).toBeUndefined();
   });
 
-  test("resolves a macOS app resource before the standalone-adjacent fallback", () => {
+  test("prefers the standalone-adjacent addon before a macOS app resource", () => {
     expect(packagedKeyringCandidates({
       executable: "/Applications/OpenCodex.app/Contents/MacOS/ocx",
       platform: "darwin",
       arch: "arm64",
     })).toEqual([
-      "/Applications/OpenCodex.app/Contents/Resources/keyring/keyring.darwin-arm64.node",
       "/Applications/OpenCodex.app/Contents/MacOS/keyring/keyring.darwin-arm64.node",
+      "/Applications/OpenCodex.app/Contents/Resources/keyring/keyring.darwin-arm64.node",
     ]);
   });
 
