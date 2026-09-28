@@ -10,6 +10,7 @@ import {
   createSseInspector,
   markEagerRelaySseResponse,
   markNativePassthroughSseResponse,
+  markPreinspectedJsonResponse,
   consumeForInspection,
   consumeForResponseLogMetadata,
   relaySseWithFailedTail,
@@ -32,7 +33,7 @@ import { recordSubagentQuotaFailureForThreadSpawn } from "../../codex/subagent-m
 import { recordCodexUpstreamOutcome } from "../../codex/routing";
 import { codexProbeLeaseId, codexProbeQuotaScope, codexTransientProbeGrant, releaseCodexAuthContextProbeLease } from "../../codex/auth-context";
 import { consumeComboFailure } from "./core-combo-failure";
-import { readDisplaySafeErrorText } from "./core-errors";
+import { clientCancelledResponse, readDisplaySafeErrorText } from "./core-errors";
 import { streamingContextOverflowResponse, jsonContextOverflowResponse } from "./context-overflow";
 import { formatPassthroughUpstreamError } from "./passthrough-error";
 import { rewriteUpstreamPolicyRefusal } from "./policy-refusal";
@@ -135,8 +136,26 @@ import { inspectResponseLogJson } from "../request-log";
 import { restoreRoutedCustomCallsInJson } from "../../responses/custom-tool-compat";
 import { restoreRoutedToolSearchCallsInJson } from "../../responses/tool-search-compat";
 import { responsesJsonToSseStream } from "../responses-json-events";
+import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
+import { collectBufferedResponsesSse, type BufferedResponsesSseResult } from "./buffered-sse-json";
 
 const PLAINTEXT_V2_SSE_PREFIX_LIMIT = 4096;
+
+/** Replay retained SSE in small views so the rewrite decoder never receives one 32 MiB chunk. */
+function replayBufferedSse(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  let offset = 0;
+  return new ReadableStream({
+    pull(controller) {
+      if (offset >= bytes.byteLength) {
+        controller.close();
+        return;
+      }
+      const end = Math.min(bytes.byteLength, offset + 64 * 1024);
+      controller.enqueue(bytes.subarray(offset, end));
+      offset = end;
+    },
+  });
+}
 
 /** Prefix-probe budget: bounds one silent gap and the whole probe alike. */
 interface PlaintextV2SseProbeOptions {
@@ -348,10 +367,12 @@ export async function deliverPassthroughResponse(
   const { requestBindings } = transportState;
 
   let upstreamResponse = nativeExchange.upstreamResponse;
+  const canonicalBufferedJson = clientRequestedStream !== true
+    && isCanonicalOpenAiForwardProvider(route.provider);
   const originalContentType = upstreamResponse.headers.get("content-type");
   if (isUsageDebugEnabled() && originalContentType) logCtx.usageDebugContentType = originalContentType;
   if (responseEffects.plaintextV2AgentMessageToolNames.size > 0
-    && upstreamResponse.ok && upstreamResponse.body && parsed.stream
+    && upstreamResponse.ok && upstreamResponse.body && (parsed.stream || canonicalBufferedJson)
     && !originalContentType?.toLowerCase().includes("text/event-stream")
     && !originalContentType?.toLowerCase().includes("application/json")
     && !isCodexWsUpstreamResponse(upstreamResponse)
@@ -372,7 +393,11 @@ export async function deliverPassthroughResponse(
     // reach this fallback only after their first Responses event is confirmed.
     const passthroughCt = headers.get("content-type")?.toLowerCase();
     const isEventStream = passthroughCt?.includes("text/event-stream")
-      || (responseEffects.plaintextV2AgentMessageToolNames.size === 0 && upstreamResponse.ok && !!upstreamResponse.body && !passthroughCt && parsed.stream);
+      || (responseEffects.plaintextV2AgentMessageToolNames.size === 0
+        && upstreamResponse.ok
+        && !!upstreamResponse.body
+        && !passthroughCt
+        && (parsed.stream || canonicalBufferedJson));
     const recordTerminalOutcome = codexForwardTerminalOutcomeRecorder(
       config,
       admissionState.authCtx,
@@ -522,10 +547,13 @@ export async function deliverPassthroughResponse(
     const grokUpstreamEchoEnabled = isXaiResponsesDestination(route.provider)
       && responsesRequestMayReplayToolOutput(parsed._rawBody);
     if (isEventStream && upstreamResponse.body) {
-      // For streamed passthrough, a successful terminal response means non-error upstream status
-      // before relay starts. Waiting for SSE completion would retain request state across the whole
-      // stream; a later body failure does not undo that this destination accepted and served the turn.
-      commitReasoningReplayServingRoute(nativeExchange.request.headers);
+      // Streaming clients commit the serving route once the upstream accepted the turn; retaining
+      // request state until their body ends would change the existing relay contract. The canonical
+      // non-streaming fold below is different: nothing is published yet, so it defers this mutation
+      // until both the raw and rewritten terminal snapshots validate.
+      if (!canonicalBufferedJson) {
+        commitReasoningReplayServingRoute(nativeExchange.request.headers);
+      }
       const terminalRepairPolicy = route.staticPolicy.model.responsesTerminalRepair;
       // #3761: opt-in hosted-web-search bridge. Codex always declares the hosted web_search tool,
       // and this branch relays that declaration on the assumption the destination executes it.
@@ -665,7 +693,9 @@ export async function deliverPassthroughResponse(
       // are not the Responses wire shapes the snapshot must mirror.
       // Only validated client blocks may publish plaintext continuation state.
       // Raw inspection precedes rewriting on eager relays, so it cannot own this write.
-      const plaintextInspector = !grokUpstreamEchoEnabled && responseEffects.plaintextV2AgentMessageToolNames.size > 0
+      const plaintextInspector = !canonicalBufferedJson
+        && !grokUpstreamEchoEnabled
+        && responseEffects.plaintextV2AgentMessageToolNames.size > 0
         ? createSseInspector({ onCompletedResponse: rememberPassthroughResponseChecked })
         : undefined;
       const plaintextEncoder = plaintextInspector ? new TextEncoder() : undefined;
@@ -748,6 +778,129 @@ export async function deliverPassthroughResponse(
         ? composeSseBlockRewrites(...blockRewrites)
         : undefined;
       const needsClientRewrite = clientBlockRewrite !== undefined;
+
+      if (canonicalBufferedJson) {
+        const signal = options.abortSignal ?? req.signal;
+        const failBufferedTurn = (message: string): Response => {
+          upstream.abort(new Error(message));
+          if (recordTerminalOutcomes) {
+            logCtx.transportPhase = "mid_stream";
+            logCtx.terminalSource = "synthetic";
+            if (logCtx.activeAttempt) logCtx.activeAttempt.streamAborted = true;
+            terminalRecorder?.("failed", 502);
+            options.onNativePassthroughTerminal?.("failed");
+          }
+          return formatErrorResponse(502, "upstream_error", message);
+        };
+        let raw: BufferedResponsesSseResult | undefined = await collectBufferedResponsesSse(
+          passthroughSseBody,
+          upstream,
+          { signal, terminalBoundary: codexSafetyBufferingOptions, retainTranscript: true },
+        );
+        if (!raw.ok) {
+          if (raw.kind === "aborted" || signal.aborted) {
+            responseEffects.responseCompletionCancelled = true;
+            options.onNativePassthroughCancel?.();
+            return clientCancelledResponse();
+          }
+          const message = raw.kind === "oversized"
+            ? "upstream SSE response exceeded the safe body limit"
+            : raw.kind === "timeout"
+              ? "upstream SSE response stalled before completing"
+              : raw.kind === "malformed" || raw.kind === "missing_terminal"
+                ? "upstream SSE response ended without one valid terminal response"
+                : "upstream SSE response failed before a valid terminal response";
+          return failBufferedTurn(message);
+        }
+        if (!raw.bytes) return failBufferedTurn("upstream SSE transcript was not retained for rewriting");
+        let rawBytes: Uint8Array | undefined = raw.bytes;
+        raw = undefined; // Release the raw reconstruction graph before building the client copy.
+
+        // Reuse the ordinary client rewrite chain against the bounded transcript. The raw pass
+        // above validates before any continuation or outcome side effect; this second validation
+        // means a rewrite failure cannot publish a turn the non-streaming caller never received.
+        let bufferedClientBody: ReadableStream<Uint8Array> | undefined = clientBlockRewrite
+          ? relaySseWithBlockRewrite(
+            replayBufferedSse(rawBytes),
+            clientBlockRewrite,
+            translatorBudget,
+          )
+          : replayBufferedSse(rawBytes);
+        const client = await collectBufferedResponsesSse(bufferedClientBody, upstream, {
+          signal,
+          retainTranscript: false,
+        });
+        bufferedClientBody = undefined;
+        if (!client.ok) {
+          if (client.kind === "aborted" || signal.aborted) {
+            responseEffects.responseCompletionCancelled = true;
+            options.onNativePassthroughCancel?.();
+            return clientCancelledResponse();
+          }
+          const message = client.kind === "oversized"
+            ? "rewritten SSE response exceeded the safe body limit"
+            : client.kind === "timeout"
+              ? "rewritten SSE response stalled before completing"
+              : "rewritten SSE response did not contain one valid terminal response";
+          return failBufferedTurn(message);
+        }
+
+        // Effects intentionally run only after both bounded validations. They inspect the same
+        // upstream-facing transcript as the streaming relay and fire once; continuation storage
+        // receives the final client-visible response once after all restorations succeeded.
+        commitReasoningReplayServingRoute(nativeExchange.request.headers);
+        const reportNativeTerminal = recordTerminalOutcomes
+          ? (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
+            terminalRecorder?.(status, httpStatusOverride);
+            if (status === "failed" || status === "incomplete") {
+              const quotaFailureMessage = [httpStatusOverride, logCtx.terminalHttpStatus]
+                .find(value => value === 429 || value === 402);
+              if (!isFixedCodexAccount(admissionState.authCtx) && quotaFailureMessage !== undefined) {
+                recordSubagentQuotaFailureForThreadSpawn(
+                  req.headers,
+                  subagentQuotaFailureModel,
+                  quotaFailureMessage,
+                  config,
+                  requestState.subagentFallbackAccountId,
+                );
+              }
+            }
+            options.onNativePassthroughTerminal?.(status);
+          }
+          : undefined;
+        const effectInspector = createSseInspector({
+          onTerminal: reportNativeTerminal,
+          logCtx,
+          onParsedPayload: noteInspectedPayload,
+          onFirstOutput: options.onFirstOutput,
+          pinCompletedResponseIdToFirstSeen: githubCopilotRepairEnabled,
+        });
+        try {
+          // The deferred effects pass must not turn a bounded 32 MiB transcript into one long
+          // event-loop monopoly. Keep decoder input small and yield between MiB groups; the
+          // aggregate frame cap was already enforced by both validation passes.
+          for (let offset = 0; offset < rawBytes.byteLength; offset += 64 * 1024) {
+            effectInspector.feed(rawBytes.subarray(offset, Math.min(rawBytes.byteLength, offset + 64 * 1024)));
+            if (offset > 0 && offset % (1024 * 1024) === 0) await new Promise<void>(resolve => setTimeout(resolve, 0));
+          }
+          effectInspector.finish();
+        } finally {
+          effectInspector.dispose();
+        }
+        rawBytes = undefined;
+        if (client.terminal.status === "completed") {
+          rememberPassthroughResponseChecked(client.terminal.response);
+        }
+
+        const jsonHeaders = sanitizePassthroughHeaders(headers, codexSafetyBufferingOptions);
+        jsonHeaders.set("content-type", "application/json");
+        return markPreinspectedJsonResponse(new Response(JSON.stringify(client.terminal.response), {
+          status: upstreamResponse.status,
+          statusText: upstreamResponse.statusText,
+          headers: jsonHeaders,
+        }));
+      }
+
       const relayPlatform = relayPlatformForTests ?? process.platform;
       // #864: win32 rewrite traffic must never enter the tee()+JS-pull chain
       // (Bun#32111 JS-sink segfault — text frames pass, the terminal block is
