@@ -2,7 +2,7 @@
  * Opt-in Anthropic OAuth account pool controls (#294).
  * Experimental — shows a strong warning because the feature is not battle-tested.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useT } from "../../i18n/shared";
 import { getPoolSettings, putPoolSettings } from "../../pool-settings";
 import {
@@ -54,10 +54,8 @@ export default function AnthropicAccountPoolSettings({
   const mountedRef = useRef(true);
   const apiBaseRef = useRef(apiBase);
   const saveAbortRef = useRef<AbortController | null>(null);
-  onThresholdChangeRef.current = onThresholdChange;
-  apiBaseRef.current = apiBase;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
@@ -65,6 +63,11 @@ export default function AnthropicAccountPoolSettings({
       saveAbortRef.current = null;
     };
   }, []);
+
+  useLayoutEffect(() => {
+    onThresholdChangeRef.current = onThresholdChange;
+    apiBaseRef.current = apiBase;
+  }, [apiBase, onThresholdChange]);
 
   useEffect(() => {
     let cancelled = false;
