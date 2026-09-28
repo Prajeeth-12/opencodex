@@ -18,6 +18,12 @@ import {
 export const MAX_BUFFERED_RESPONSES_OUTPUT_ITEMS = 10_000;
 export const MAX_BUFFERED_RESPONSES_RECONSTRUCTION_BYTES = MAX_UPSTREAM_JSON_BODY_BYTES;
 export const MAX_BUFFERED_RESPONSES_SSE_FRAMES = 100_000;
+/**
+ * A buffered caller cannot consume partial output, so keep one independent lifetime ceiling even
+ * when the operator disables the ordinary silence clock. Fifteen minutes is intentionally much
+ * larger than the public default stall budget while still releasing an abandoned body eventually.
+ */
+export const BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS = 15 * 60_000;
 const BUFFERED_SSE_PROCESSING_SLICE_BYTES = 64 * 1024;
 
 export type BufferedResponsesTerminal = {
@@ -29,6 +35,14 @@ export type BufferedResponsesSseFailure = {
   ok: false;
   kind: "aborted" | "malformed" | "missing_terminal" | "oversized" | "read_error" | "timeout";
   error?: unknown;
+  /** Bounded diagnostic captured from a bare upstream `error` event. */
+  upstreamError?: string;
+  /** Fatal provider refusal verdict that must not be flattened into a retryable transport error. */
+  upstreamRefusalCode?: string;
+  /** Bounded structured class from the same bare error envelope as `upstreamError`. */
+  upstreamErrorType?: string;
+  /** Bounded structured code; unknown codes remain transport failures instead of message guesses. */
+  upstreamErrorCode?: string;
 };
 
 export type BufferedResponsesSseResult = {
@@ -42,9 +56,41 @@ type BufferedReadOptions = {
   maxBytes?: number;
   maxFrames?: number;
   totalTimeoutMs?: number;
+  /** Absolute whole-turn deadline shared by every validation pass. */
+  deadlineAt?: number;
   inactivityTimeoutMs?: number;
   firstByteTimeoutMs?: number;
 };
+
+export type BufferedResponsesReadOptions = BufferedReadOptions & { deadlineAt: number };
+
+/**
+ * Resolve the read clocks for canonical SSE that must be folded into client JSON.
+ *
+ * A positive stall budget owns both time-to-first-byte and inter-chunk silence. A disabled budget
+ * must not become an immediate timeout, so both clocks fall back to the independent total ceiling.
+ * The ceiling remains separate because a JSON caller has no partial body to keep alive forever.
+ */
+export function bufferedResponsesReadOptions(
+  stallTimeoutMs: number,
+  totalTimeoutMs = BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS,
+  startedAt = Date.now(),
+): BufferedResponsesReadOptions {
+  if (!Number.isFinite(stallTimeoutMs)) throw new RangeError("stallTimeoutMs must be finite");
+  if (!Number.isSafeInteger(totalTimeoutMs) || totalTimeoutMs <= 0) {
+    throw new RangeError("totalTimeoutMs must be a positive safe integer");
+  }
+  if (!Number.isSafeInteger(startedAt) || startedAt < 0 || startedAt > Number.MAX_SAFE_INTEGER - totalTimeoutMs) {
+    throw new RangeError("startedAt must produce a safe deadline");
+  }
+  const silenceTimeoutMs = stallTimeoutMs > 0 ? Math.ceil(stallTimeoutMs) : totalTimeoutMs;
+  return {
+    totalTimeoutMs,
+    deadlineAt: startedAt + totalTimeoutMs,
+    firstByteTimeoutMs: silenceTimeoutMs,
+    inactivityTimeoutMs: silenceTimeoutMs,
+  };
+}
 
 type Uint8ReadResult = Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>;
 
@@ -182,6 +228,10 @@ export async function collectBufferedResponsesSse(
   const totalTimeoutMs = options.read?.totalTimeoutMs ?? UPSTREAM_JSON_BODY_TOTAL_TIMEOUT_MS;
   const inactivityTimeoutMs = options.read?.inactivityTimeoutMs ?? UPSTREAM_JSON_BODY_INACTIVITY_TIMEOUT_MS;
   const firstByteTimeoutMs = options.read?.firstByteTimeoutMs ?? totalTimeoutMs;
+  const absoluteDeadlineAt = options.read?.deadlineAt;
+  if (absoluteDeadlineAt !== undefined && (!Number.isSafeInteger(absoluteDeadlineAt) || absoluteDeadlineAt < 0)) {
+    throw new RangeError("deadlineAt must be a non-negative safe integer");
+  }
   const retainTranscript = options.retainTranscript === true;
   const reader = body.getReader();
   const boundary = createSseTerminalOutputBoundary({
@@ -198,8 +248,22 @@ export async function collectBufferedResponsesSse(
   let retained = retainTranscript ? new Uint8Array(Math.min(maxBytes, 64 * 1024)) : undefined;
   let retainedBytes = 0;
   const startedAt = Date.now();
-  const totalDeadlineAt = startedAt + totalTimeoutMs;
+  const totalDeadlineAt = absoluteDeadlineAt ?? startedAt + totalTimeoutMs;
   let inactivityDeadlineAt = startedAt + firstByteTimeoutMs;
+
+  const withBoundaryError = <T extends BufferedResponsesSseFailure>(failure: T): T => {
+    const upstreamError = boundary.upstreamError();
+    const upstreamRefusalCode = boundary.upstreamRefusalCode();
+    const upstreamErrorType = boundary.upstreamErrorType();
+    const upstreamErrorCode = boundary.upstreamErrorCode();
+    return {
+      ...failure,
+      ...(upstreamError === undefined ? {} : { upstreamError }),
+      ...(upstreamRefusalCode === undefined ? {} : { upstreamRefusalCode }),
+      ...(upstreamErrorType === undefined ? {} : { upstreamErrorType }),
+      ...(upstreamErrorCode === undefined ? {} : { upstreamErrorCode }),
+    };
+  };
 
   const inspect = (chunk: Uint8Array): void => {
     if (chunk.byteLength === 0) return;
@@ -251,7 +315,7 @@ export async function collectBufferedResponsesSse(
     const terminal = state.result();
     if (!terminal.ok) {
       upstream.abort(new Error(`buffered Responses SSE ${terminal.kind}`));
-      return terminal;
+      return withBoundaryError(terminal);
     }
     return {
       ...terminal,
@@ -260,7 +324,7 @@ export async function collectBufferedResponsesSse(
   } catch (error) {
     upstream.abort(error);
     cancelReader(reader, error);
-    return {
+    return withBoundaryError({
       ok: false,
       kind: options.signal?.aborted
         ? "aborted"
@@ -272,7 +336,7 @@ export async function collectBufferedResponsesSse(
             ? "oversized"
             : "read_error",
       error,
-    };
+    });
   } finally {
     boundary.dispose();
     state.inspector.dispose();

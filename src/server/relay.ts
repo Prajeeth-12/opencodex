@@ -242,6 +242,8 @@ function boundedBareUpstreamErrorMessage(payload: unknown): string | undefined {
 function boundedBareUpstreamError(payload: unknown): {
   message: string;
   refusalCode: string | undefined;
+  errorType: string | undefined;
+  errorCode: string | undefined;
 } | undefined {
   const root = asJsonRecord(payload);
   if (!root || root.type !== "error") return undefined;
@@ -251,21 +253,30 @@ function boundedBareUpstreamError(payload: unknown): {
   // that supplied the message also supplies the verdict. Taking the FIRST code
   // rather than searching for a refusal is what stops a refusal nested below a
   // transient one from overruling it.
-  const code = [
+  const candidates = [
     asJsonRecord(root.error),
     asJsonRecord(root.last_error),
     asJsonRecord(response?.error),
     asJsonRecord(response?.incomplete_details),
     root,
-  ]
-    .map(candidate => stringField(candidate, "code"))
-    .find(candidate => candidate !== undefined);
+  ];
+  const code = candidates.map(candidate => stringField(candidate, "code"))
+    .find(candidate => candidate !== undefined)?.slice(0, 128);
+  // Root `type` is the SSE event discriminator (`"error"`), not an error class. Only nested
+  // error records can authoritatively name classes such as rate_limit_error or server_error.
+  const errorType = candidates.slice(0, -1).map(candidate => stringField(candidate, "type"))
+    .find(candidate => candidate !== undefined)?.slice(0, 128);
   const refusalCode = code !== undefined
     ? (isTerminalRefusalCode(code) ? code : undefined)
     : message === undefined ? undefined : safetyRefusalCodeFromMessage(message);
-  if (message !== undefined) return { message, refusalCode };
+  if (message !== undefined) return { message, refusalCode, errorType, errorCode: code };
   if (refusalCode === undefined) return undefined;
-  return { message: terminalRefusalFallbackMessage(refusalCode), refusalCode };
+  return {
+    message: terminalRefusalFallbackMessage(refusalCode),
+    refusalCode,
+    errorType,
+    errorCode: code,
+  };
 }
 
 export type SseTerminalOutputBoundary = {
@@ -275,6 +286,8 @@ export type SseTerminalOutputBoundary = {
   doneSeen(): boolean;
   upstreamError(): string | undefined;
   upstreamRefusalCode(): string | undefined;
+  upstreamErrorType(): string | undefined;
+  upstreamErrorCode(): string | undefined;
   dispose(): void;
 };
 
@@ -329,6 +342,8 @@ export function createSseTerminalOutputBoundary(
   let disposed = false;
   let upstreamError: string | undefined;
   let upstreamRefusalCode: string | undefined;
+  let upstreamErrorType: string | undefined;
+  let upstreamErrorCode: string | undefined;
   let inputBytes = 0;
   let outputBytes = 0;
   let framesSeen = 0;
@@ -362,6 +377,8 @@ export function createSseTerminalOutputBoundary(
       if (bare !== undefined) {
         upstreamError = bare.message;
         upstreamRefusalCode = bare.refusalCode;
+        upstreamErrorType = bare.errorType;
+        upstreamErrorCode = bare.errorCode;
       }
       const safetyBuffering = dropSafetyBuffering && parsed !== undefined
         ? codexSafetyBufferingBlockAction(parsed) : "keep";
@@ -449,6 +466,8 @@ export function createSseTerminalOutputBoundary(
     doneSeen: () => done,
     upstreamError: () => upstreamError,
     upstreamRefusalCode: () => upstreamRefusalCode,
+    upstreamErrorType: () => upstreamErrorType,
+    upstreamErrorCode: () => upstreamErrorCode,
     dispose() {
       if (disposed) return;
       disposed = true;

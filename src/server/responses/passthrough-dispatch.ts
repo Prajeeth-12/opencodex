@@ -267,6 +267,11 @@ export async function preparePassthroughExchange(
     // for non-streaming JSON and skip both opaque-state and safe-reset recovery.
     const upstreamRequestsStream = parsed.stream === true
       || isCanonicalOpenAiForwardProvider(route.provider);
+    // A JSON client still needs the canonical destination's HTTP/SSE response so delivery can
+    // validate and fold it. Letting the forced `stream:true` body select the WebSocket transport
+    // bypasses manual HTTP redirects and can turn a real 3xx into a connect timeout.
+    const canonicalBufferedJson = clientRequestedStream !== true
+      && isCanonicalOpenAiForwardProvider(route.provider);
     const imageGenCallAliases = route.provider.authMode === "forward"
       ? new Map<string, { namespace: string; name: string }>()
       : imageGenToolCallAliases(toolBridgeMaps.toolNsMap, parsed._rawBody, translatorBudget);
@@ -953,6 +958,7 @@ export async function preparePassthroughExchange(
             body: request.body,
           }, recovery), upstream.signal, connectMs, upstreamRequestsStream,
             providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+              httpOnly: canonicalBufferedJson,
               nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
                 && responseEffects.plaintextV2AgentMessageToolNames.size === 0
                 ? options.nativeControl : undefined,
@@ -1057,10 +1063,11 @@ export async function preparePassthroughExchange(
               body: request.body,
             }, innerRecovery), upstream.signal, connectMs, upstreamRequestsStream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-              nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
-                && responseEffects.plaintextV2AgentMessageToolNames.size === 0
-                ? options.nativeControl : undefined,
-              dispatchOverride: oauthDispatch(request),
+                httpOnly: canonicalBufferedJson,
+                nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
+                  && responseEffects.plaintextV2AgentMessageToolNames.size === 0
+                  ? options.nativeControl : undefined,
+                dispatchOverride: oauthDispatch(request),
                 providerName: route.providerName,
                 modelId: route.modelId,
                 onCodexWsQuota: codexWsQuotaObserver(admissionState.authCtx, route.provider, route.modelId),
@@ -1163,6 +1170,7 @@ export async function preparePassthroughExchange(
         // rather than a second one to announce.
         const oauthReplayExecutor = storedPoolReplayDispatchNotifier(
           providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+            httpOnly: canonicalBufferedJson,
             nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
               && responseEffects.plaintextV2AgentMessageToolNames.size === 0
               ? options.nativeControl : undefined,
@@ -1312,10 +1320,11 @@ export async function preparePassthroughExchange(
               body: request.body,
             }, recovery), upstream.signal, connectMs, upstreamRequestsStream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-              nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
-                && responseEffects.plaintextV2AgentMessageToolNames.size === 0
-                ? options.nativeControl : undefined,
-              dispatchOverride: oauthDispatch(request),
+                httpOnly: canonicalBufferedJson,
+                nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
+                  && responseEffects.plaintextV2AgentMessageToolNames.size === 0
+                  ? options.nativeControl : undefined,
+                dispatchOverride: oauthDispatch(request),
                 providerName: route.providerName,
                 modelId: route.modelId,
                 onCodexWsQuota: codexWsQuotaObserver(admissionState.authCtx, route.provider, route.modelId),
@@ -1446,10 +1455,11 @@ export async function preparePassthroughExchange(
               body: request.body,
             }, recovery), upstream.signal, connectMs, upstreamRequestsStream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-              nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
-                && responseEffects.plaintextV2AgentMessageToolNames.size === 0
-                ? options.nativeControl : undefined,
-              dispatchOverride: oauthDispatch(request),
+                httpOnly: canonicalBufferedJson,
+                nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
+                  && responseEffects.plaintextV2AgentMessageToolNames.size === 0
+                  ? options.nativeControl : undefined,
+                dispatchOverride: oauthDispatch(request),
                 providerName: route.providerName,
                 modelId: route.modelId,
                 onCodexWsQuota: codexWsQuotaObserver(admissionState.authCtx, route.provider, route.modelId),
@@ -1562,6 +1572,7 @@ export async function preparePassthroughExchange(
           connectMs,
           passthroughEstimate,
           stream: upstreamRequestsStream,
+          httpOnly: canonicalBufferedJson,
           onResponse: (response, retryAuthCtx, retryRequest) => {
             adoptCodexWsStage(response);
             captureAffinityResponse(

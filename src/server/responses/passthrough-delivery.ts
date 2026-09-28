@@ -132,12 +132,21 @@ import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { idleDeadline } from "../../lib/abort";
 import { resolveStallTimeoutMs } from "../../stall-timeout";
 import { formatErrorResponse } from "../../bridge";
-import { inspectResponseLogJson } from "../request-log";
+import {
+  httpStatusFromTerminalError,
+  inspectResponseLogJson,
+  inspectResponseLogSsePayloadParsed,
+} from "../request-log";
 import { restoreRoutedCustomCallsInJson } from "../../responses/custom-tool-compat";
 import { restoreRoutedToolSearchCallsInJson } from "../../responses/tool-search-compat";
 import { responsesJsonToSseStream } from "../responses-json-events";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
-import { collectBufferedResponsesSse, type BufferedResponsesSseResult } from "./buffered-sse-json";
+import {
+  bufferedResponsesReadOptions,
+  collectBufferedResponsesSse,
+  type BufferedResponsesSseFailure,
+  type BufferedResponsesSseResult,
+} from "./buffered-sse-json";
 
 const PLAINTEXT_V2_SSE_PREFIX_LIMIT = 4096;
 
@@ -155,6 +164,60 @@ function replayBufferedSse(bytes: Uint8Array): ReadableStream<Uint8Array> {
       offset = end;
     },
   });
+}
+
+const BUFFERED_CONTEXT_ERROR_CODES = new Set([
+  "context_length_exceeded", "context_window_exceeded", "input_too_long",
+]);
+const BUFFERED_QUOTA_ERROR_CODES = new Set([
+  "usage_limit_exceeded", "usage_limit_reached", "rate_limit_exceeded", "insufficient_quota",
+]);
+const BUFFERED_OVERLOAD_ERROR_CODES = new Set(["server_is_overloaded"]);
+
+function bufferedErrorDefaults(status: number): { type: string; code: string } {
+  switch (status) {
+    case 400: return { type: "invalid_request_error", code: "invalid_request_error" };
+    case 401: return { type: "authentication_error", code: "invalid_api_key" };
+    case 403: return { type: "permission_error", code: "permission_denied" };
+    case 429: return { type: "rate_limit_error", code: "rate_limit_exceeded" };
+    case 499: return { type: "client_closed_request", code: "client_closed_request" };
+    case 503: return { type: "server_error", code: "server_is_overloaded" };
+    default: return { type: "upstream_error", code: "upstream_server_error" };
+  }
+}
+
+/** Preserve only explicit, recognized bare-error classes; diagnostic wording never sets status. */
+function bufferedBareErrorPresentation(
+  failure: BufferedResponsesSseFailure,
+  message: string,
+): { status: number; error: { type: string; code: string; message: string } } {
+  if (failure.upstreamRefusalCode !== undefined) {
+    return {
+      status: 400,
+      error: { type: "invalid_request_error", code: failure.upstreamRefusalCode, message },
+    };
+  }
+  const explicitCode = failure.upstreamErrorCode;
+  const status = explicitCode !== undefined
+    ? BUFFERED_CONTEXT_ERROR_CODES.has(explicitCode) ? 400
+      : BUFFERED_QUOTA_ERROR_CODES.has(explicitCode) ? 429
+        : BUFFERED_OVERLOAD_ERROR_CODES.has(explicitCode) ? 503
+        : httpStatusFromTerminalError({ code: explicitCode })
+    : httpStatusFromTerminalError({ type: failure.upstreamErrorType });
+  const defaults = bufferedErrorDefaults(status);
+  if (status === 502) return { status, error: { ...defaults, message } };
+  const explicitType = failure.upstreamErrorType;
+  const typeMatchesStatus = explicitType !== undefined
+    && (httpStatusFromTerminalError({ type: explicitType }) === status
+      || (explicitType === "server_error" && status === 503));
+  return {
+    status,
+    error: {
+      type: typeMatchesStatus ? explicitType! : defaults.type,
+      code: explicitCode ?? defaults.code,
+      message,
+    },
+  };
 }
 
 /** Prefix-probe budget: bounds one silent gap and the whole probe alike. */
@@ -781,21 +844,70 @@ export async function deliverPassthroughResponse(
 
       if (canonicalBufferedJson) {
         const signal = options.abortSignal ?? req.signal;
-        const failBufferedTurn = (message: string): Response => {
+        const bufferedRead = bufferedResponsesReadOptions(resolveStallTimeoutMs(
+          config.stallTimeoutSec,
+          { localUpstream: nativeExchange.localUpstream },
+        ));
+        const failBufferedTurn = (
+          message: string,
+          failure?: BufferedResponsesSseFailure,
+        ): Response => {
           upstream.abort(new Error(message));
+          const upstreamError = failure?.upstreamError;
+          const upstreamRefusalCode = failure?.upstreamRefusalCode;
+          const presentation = upstreamError === undefined || failure === undefined
+            ? undefined
+            : bufferedBareErrorPresentation(failure, upstreamError);
+          if (upstreamError !== undefined) {
+            // The streaming relay turns a bare `error` event into a terminal failure. Mirror that
+            // verdict for JSON callers before recording/formatting it, or a provider refusal is
+            // misreported as a retryable generic 502 and clients can replay a rejected turn.
+            const error = presentation!.error;
+            const terminalPayload = {
+              type: "response.failed",
+              response: { status: "failed", error, last_error: error },
+            };
+            // Classification comes only from the bounded structured type/code above. A bare
+            // transport reset can contain misleading copy such as "invalid api key"; letting the
+            // log's message fallback reinterpret it would retire a healthy credential.
+            logCtx.terminalHttpStatus = presentation!.status;
+            noteInspectedPayload(terminalPayload);
+            inspectResponseLogSsePayloadParsed(
+              logCtx,
+              JSON.stringify(terminalPayload),
+              terminalPayload,
+            );
+          }
+          const failureStatus = logCtx.terminalHttpStatus ?? 502;
           if (recordTerminalOutcomes) {
             logCtx.transportPhase = "mid_stream";
             logCtx.terminalSource = "synthetic";
             if (logCtx.activeAttempt) logCtx.activeAttempt.streamAborted = true;
-            terminalRecorder?.("failed", 502);
+            terminalRecorder?.("failed", failureStatus);
             options.onNativePassthroughTerminal?.("failed");
+          }
+          if (upstreamError !== undefined) {
+            const failureHeaders = new Headers(headers);
+            failureHeaders.set("content-type", "application/json");
+            failureHeaders.delete("content-length");
+            failureHeaders.delete("content-encoding");
+            if (upstreamRefusalCode !== undefined) failureHeaders.delete("retry-after");
+            const error = presentation!.error;
+            return formatPassthroughUpstreamError(
+              failureStatus,
+              JSON.stringify({ error, ...(upstreamRefusalCode === undefined ? {} : { retryable: false }) }),
+              {
+                headers: failureHeaders,
+                suppressRetryAfter: upstreamRefusalCode !== undefined,
+              },
+            );
           }
           return formatErrorResponse(502, "upstream_error", message);
         };
         let raw: BufferedResponsesSseResult | undefined = await collectBufferedResponsesSse(
           passthroughSseBody,
           upstream,
-          { signal, terminalBoundary: codexSafetyBufferingOptions, retainTranscript: true },
+          { signal, terminalBoundary: codexSafetyBufferingOptions, read: bufferedRead, retainTranscript: true },
         );
         if (!raw.ok) {
           if (raw.kind === "aborted" || signal.aborted) {
@@ -810,7 +922,7 @@ export async function deliverPassthroughResponse(
               : raw.kind === "malformed" || raw.kind === "missing_terminal"
                 ? "upstream SSE response ended without one valid terminal response"
                 : "upstream SSE response failed before a valid terminal response";
-          return failBufferedTurn(message);
+          return failBufferedTurn(message, raw);
         }
         if (!raw.bytes) return failBufferedTurn("upstream SSE transcript was not retained for rewriting");
         let rawBytes: Uint8Array | undefined = raw.bytes;
@@ -828,6 +940,7 @@ export async function deliverPassthroughResponse(
           : replayBufferedSse(rawBytes);
         const client = await collectBufferedResponsesSse(bufferedClientBody, upstream, {
           signal,
+          read: bufferedRead,
           retainTranscript: false,
         });
         bufferedClientBody = undefined;
@@ -842,7 +955,10 @@ export async function deliverPassthroughResponse(
             : client.kind === "timeout"
               ? "rewritten SSE response stalled before completing"
               : "rewritten SSE response did not contain one valid terminal response";
-          return failBufferedTurn(message);
+          return failBufferedTurn(message, client);
+        }
+        if (Date.now() >= bufferedRead.deadlineAt) {
+          return failBufferedTurn("buffered Responses turn exceeded the safe total deadline");
         }
 
         // Effects intentionally run only after both bounded validations. They inspect the same

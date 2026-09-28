@@ -5,6 +5,8 @@ import { getDefaultConfig } from "../../src/config";
 import { CODEX_FORWARD_BASE_URL } from "../../src/providers/openai-tiers";
 import { handleResponses } from "../../src/server/responses";
 import {
+  BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS,
+  bufferedResponsesReadOptions,
   collectBufferedResponsesSse,
   inspectBufferedResponsesTerminal,
 } from "../../src/server/responses/buffered-sse-json";
@@ -410,6 +412,145 @@ describe("canonical ChatGPT transport for non-streaming Responses callers (#6162
       read: { firstByteTimeoutMs: 5, inactivityTimeoutMs: 5, totalTimeoutMs: 20 },
     });
     expect(result).toMatchObject({ ok: false, kind: "timeout" });
+  });
+
+  test("disabled stall budget falls back to the independent buffered-turn ceiling", async () => {
+    const startedAt = 1_000;
+    expect(bufferedResponsesReadOptions(0, BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS, startedAt)).toEqual({
+      deadlineAt: startedAt + BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS,
+      firstByteTimeoutMs: BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS,
+      inactivityTimeoutMs: BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS,
+      totalTimeoutMs: BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS,
+    });
+    expect(bufferedResponsesReadOptions(2_500, BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS, startedAt)).toEqual({
+      deadlineAt: startedAt + BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS,
+      firstByteTimeoutMs: 2_500,
+      inactivityTimeoutMs: 2_500,
+      totalTimeoutMs: BUFFERED_RESPONSES_TOTAL_TIMEOUT_MS,
+    });
+
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        setTimeout(() => {
+          controller.enqueue(new TextEncoder().encode(sseEvent("response.completed", {
+            response: { id: "resp_delayed", status: "completed", output: [] },
+          })));
+          controller.close();
+        }, 10);
+      },
+    });
+    const result = await collectBufferedResponsesSse(body, new AbortController(), {
+      read: bufferedResponsesReadOptions(0, 100),
+    });
+    expect(result).toMatchObject({ ok: true, terminal: { status: "completed" } });
+
+    // A later validation pass must inherit the original absolute deadline instead of receiving
+    // a fresh totalTimeoutMs window merely because it constructed a new collector.
+    const expiredSharedRead = bufferedResponsesReadOptions(0, 100, Date.now() - 200);
+    const expired = await collectBufferedResponsesSse(
+      new Response(sseEvent("response.completed", {
+        response: { id: "resp_too_late", status: "completed", output: [] },
+      })).body!,
+      new AbortController(),
+      { read: expiredSharedRead },
+    );
+    expect(expired).toMatchObject({ ok: false, kind: "timeout" });
+  });
+
+  test("bare upstream refusal keeps its message, code, and non-retryable status", async () => {
+    globalThis.fetch = (async () => new Response(sseEvent("error", {
+      error: {
+        type: "invalid_request_error",
+        code: "invalid_prompt",
+        message: "The upstream rejected this prompt. Please try again in 120s.",
+      },
+    }), { headers: { "content-type": "text/event-stream", "retry-after": "120" } })) as typeof fetch;
+    const terminals: string[] = [];
+
+    const response = await call(requestBody(false, false), {
+      onNativePassthroughTerminal: status => terminals.push(status),
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(response.headers.get("retry-after")).toBeNull();
+    expect(await response.json()).toEqual({
+      error: {
+        type: "invalid_request_error",
+        code: "invalid_prompt",
+        message: "The upstream rejected this prompt. Please try again in 120s.",
+      },
+      retryable: false,
+    });
+    expect(terminals).toEqual(["failed"]);
+  });
+
+  test("bare non-refusal error copy cannot relabel a transport failure or account outcome", async () => {
+    globalThis.fetch = (async () => new Response(sseEvent("error", {
+      error: {
+        type: "upstream_error",
+        code: "upstream_reset",
+        message: "invalid api key while forwarding the upstream reset",
+      },
+    }), { headers: { "content-type": "text/event-stream" } })) as typeof fetch;
+    const terminals: string[] = [];
+
+    const response = await call(requestBody(false, false), {
+      onNativePassthroughTerminal: status => terminals.push(status),
+    });
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: {
+        type: "upstream_error",
+        code: "upstream_server_error",
+        message: "invalid api key while forwarding the upstream reset",
+      },
+    });
+    expect(terminals).toEqual(["failed"]);
+  });
+
+  test("bare structured rate-limit error preserves its authoritative family", async () => {
+    globalThis.fetch = (async () => new Response(sseEvent("error", {
+      code: "rate_limit_exceeded",
+      message: "Rate limit exceeded.",
+    }), { headers: { "content-type": "text/event-stream" } })) as typeof fetch;
+    const terminals: string[] = [];
+
+    const response = await call(requestBody(false, false), {
+      onNativePassthroughTerminal: status => terminals.push(status),
+    });
+
+    expect(response.status).toBe(429);
+    expect(await response.json()).toEqual({
+      error: {
+        type: "rate_limit_error",
+        code: "rate_limit_exceeded",
+        message: "Rate limit exceeded.",
+      },
+    });
+    expect(terminals).toEqual(["failed"]);
+  });
+
+  test("bare structured overload keeps its server class and 503 status", async () => {
+    globalThis.fetch = (async () => new Response(sseEvent("error", {
+      error: {
+        type: "server_error",
+        code: "server_is_overloaded",
+        message: "The upstream is overloaded.",
+      },
+    }), { headers: { "content-type": "text/event-stream" } })) as typeof fetch;
+
+    const response = await call(requestBody(false, false));
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: {
+        type: "server_error",
+        code: "server_is_overloaded",
+        message: "The upstream is overloaded.",
+      },
+    });
   });
 
   test("incomplete terminals retain already-finished output items and terminal usage", () => {
