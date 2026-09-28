@@ -82,7 +82,6 @@ import {
 } from "./tray-proxy";
 import { requestBoundSystemRestart } from "./system-restart-client";
 import { installCrashGuards } from "../lib/crash-guard";
-import { inspectKeyringBinding } from "../lib/keyring-native";
 import { SpendLedgerOwnerError } from "../lib/spend-ledger-owner";
 import { redactUrlForLog } from "../lib/redact";
 import { dispatchCommand, decideBusyPreferredPort, decideStartExitTeardown, decideStartWithLiveOwner, startupLeftCodexNativeLine } from "./dispatch";
@@ -194,7 +193,7 @@ initializeNodeLauncherContext();
 
 // The compiled executable is also the capture-only MCP server's launcher.
 // Handle this private entrypoint before CLI preflight or command dispatch.
-if (process.argv[2] === "__keyring-load-check") { console.log(JSON.stringify(inspectKeyringBinding())); process.exit(0); }
+if (process.argv[2] === "__keyring-load-check") { console.log(JSON.stringify((await import("../lib/keyring-native")).inspectKeyringBinding())); process.exit(0); }
 if (process.argv[2] === "__codebuddy-mcp") {
   const { runCodeBuddyMcpServer } = await import("../adapters/codebuddy/mcp-server");
   await runCodeBuddyMcpServer(process.argv[3] ?? "");
