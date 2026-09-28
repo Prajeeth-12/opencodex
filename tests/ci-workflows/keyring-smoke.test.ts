@@ -6,6 +6,7 @@ import { runKeyringSmoke, type KeyringSmokeEntry } from "../../scripts/keyring-s
 import { stageStandaloneKeyringAddon } from "../../scripts/standalone-keyring";
 import {
   keyringAssetForStandaloneTarget,
+  inspectKeyringBinding,
   loadKeyringBinding,
   packagedKeyringCandidates,
   type KeyringBinding,
@@ -202,6 +203,15 @@ describe("packaged keyring native binding", () => {
     expect(calls).toEqual(["@napi-rs/keyring"]);
   });
 
+  test("the load-only probe verifies constructors without touching a credential", () => {
+    expect(inspectKeyringBinding(() => ({ Entry: class {}, AsyncEntry: class {} }))).toEqual({
+      schema: "ocx-keyring-load/1",
+      available: true,
+    });
+    expect(() => inspectKeyringBinding(() => ({ Entry: class {}, AsyncEntry: null } as unknown as KeyringBinding)))
+      .toThrow("does not export Entry and AsyncEntry");
+  });
+
   test("stages the selected addon under the standalone output", () => {
     const root = tempRoot();
     const output = join(root, "dist", "standalone", "bun-darwin-arm64");
@@ -229,9 +239,14 @@ describe("packaged keyring native binding", () => {
     expect(release).toContain("ocx gui keyring");
     expect(release).toContain("--os=${{ matrix.dependency_os }} --cpu=${{ matrix.dependency_cpu }}");
     expect(release).toContain('dependency_cpu: "*"');
+    expect(release).toContain("Verify the packaged universal macOS runtime");
+    expect(release).toContain("keyring.darwin-arm64.node");
+    expect(release).toContain("keyring.darwin-x64.node");
     const verify = readFileSync(repoPath("desktop", "scripts", "verify-macos-runtime.sh"), "utf8");
-    expect(verify).toContain('cd "$scratch/work"');
-    expect(verify).toContain("provider keychain openai status --json");
-    expect(verify).toContain('value.get("keychainAvailable") is True');
+    expect(verify).toContain("cwd=work");
+    expect(verify).toContain('"__keyring-load-check"');
+    expect(verify).toContain('"schema": "ocx-keyring-load/1"');
+    const cli = readFileSync(repoPath("src", "cli", "index.ts"), "utf8");
+    expect(cli).toContain('process.argv[2] === "__keyring-load-check"');
   });
 });

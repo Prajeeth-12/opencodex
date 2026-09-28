@@ -446,6 +446,15 @@ jobs:
         # diagnostics on the first attempt; Apple signing commands stay non-verbose.
         run: bunx tauri ${{ runner.os == 'Linux' && '--verbose' || '' }} build --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config "${{ runner.os == 'Windows' && format('{0}/opencodex-msi.json', runner.temp) || '{}' }}"
 
+      - name: Verify the packaged universal macOS runtime
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          app=desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/OpenCodex.app
+          test -f "$app/Contents/Resources/keyring/keyring.darwin-arm64.node"
+          test -f "$app/Contents/Resources/keyring/keyring.darwin-x64.node"
+          bash desktop/scripts/verify-macos-runtime.sh "$app"
+
       # Tauri patches a bundle-type marker into the application binary for each Linux format.
       # Keep each format in its own Cargo target so the deb cannot inherit the AppImage marker
       # and linuxdeploy cannot mutate the binary later consumed by the deb build.

@@ -6,12 +6,7 @@ app="${1:?usage: verify-macos-runtime.sh /path/to/OpenCodex.app}"
 executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
 [[ -n "$executable" && "$executable" != */* ]] || { echo 'Invalid app executable name' >&2; exit 1; }
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/opencodex-bundle-check.XXXXXX")"
-proxy_pid=""
 cleanup() {
-  if [[ -n "$proxy_pid" ]]; then
-    kill "$proxy_pid" 2>/dev/null || true
-    wait "$proxy_pid" 2>/dev/null || true
-  fi
   rm -rf "$scratch"
 }
 trap cleanup EXIT
@@ -48,31 +43,29 @@ assert value.get("schema") == "ocx-resolve/1", "Unexpected resolve schema"
 assert value.get("liveness", {}).get("status") in ("live", "absent-proven"), "Unusable resolve result"
 PY
 
-# Reproduce the packaged-keyring boundary from an unrelated cwd. Source-tree smoke tests prove the
-# OS store, but they do not prove that Bun can find the N-API addon outside its virtual `$bunfs`.
+# Reproduce the packaged-keyring boundary from an unrelated cwd. This is deliberately load-only:
+# an ad-hoc CI identity can trigger a Keychain consent dialog, while issue #6139 is module resolution.
 mkdir -p "$scratch/home" "$scratch/work"
-(
-  cd "$scratch/work"
-  HOME="$scratch/home" OPENCODEX_HOME="$scratch/home/.opencodex" \
-    "$app/Contents/MacOS/ocx" start --port 10179 > "$scratch/proxy.log" 2>&1
-) &
-proxy_pid=$!
-for _ in $(seq 1 30); do
-  curl -fsS http://127.0.0.1:10179/healthz >/dev/null 2>&1 && break
-  sleep 1
-done
-curl -fsS http://127.0.0.1:10179/healthz >/dev/null
-(
-  cd "$scratch/work"
-  HOME="$scratch/home" OPENCODEX_HOME="$scratch/home/.opencodex" \
-    "$app/Contents/MacOS/ocx" provider keychain openai status --json > "$scratch/keyring.json"
-)
+python3 - "$app/Contents/MacOS/ocx" "$scratch/work" "$scratch/home" "$scratch/keyring.json" <<'PY'
+import os, pathlib, subprocess, sys
+ocx, work, home, output = sys.argv[1:]
+env = os.environ.copy()
+env.update(HOME=home, OPENCODEX_HOME=str(pathlib.Path(home) / ".opencodex"))
+try:
+    with open(output, "wb") as stdout:
+        subprocess.run(
+            [ocx, "__keyring-load-check"], cwd=work, env=env, stdout=stdout,
+            stderr=subprocess.PIPE, check=True, timeout=15,
+        )
+except subprocess.TimeoutExpired as error:
+    raise SystemExit("Packaged keyring load probe timed out") from error
+except subprocess.CalledProcessError as error:
+    sys.stderr.buffer.write((error.stderr or b"")[-4096:])
+    raise SystemExit(f"Packaged keyring load probe exited {error.returncode}") from error
+PY
 python3 - "$scratch/keyring.json" <<'PY'
 import json, pathlib, sys
 value = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert value.get("keychainAvailable") is True, "Packaged keyring binding is unavailable"
+assert value == {"schema": "ocx-keyring-load/1", "available": True}, "Packaged keyring binding is unavailable"
 PY
-kill "$proxy_pid" 2>/dev/null || true
-wait "$proxy_pid" 2>/dev/null || true
-proxy_pid=""
 printf '%s\n' 'PASS: macOS signatures, entitlements, hardened runtime, Liquid Glass, bundled CLI resolve and packaged keyring'

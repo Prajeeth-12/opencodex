@@ -261,6 +261,9 @@ jobs:
               - 'src/service/**'
               - 'src/cli/index.ts'
               - 'src/lib/bun-runtime.ts'
+              - 'src/lib/keyring-native.ts'
+              - 'scripts/build-standalone.ts'
+              - 'scripts/standalone-keyring.ts'
               - 'package.json'
               - 'bun.lock'
               - '.github/workflows/ci.yml'
@@ -276,6 +279,7 @@ jobs:
               - 'gui/**'
               - 'src/**'
               - 'scripts/build-standalone.ts'
+              - 'scripts/standalone-keyring.ts'
               - 'scripts/standalone-targets.ts'
               - 'package.json'
               - 'bun.lock'
@@ -1311,9 +1315,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # The universal sidecar executes as either architecture, so its resource set must carry
-          # both Darwin N-API packages even though the hosted runner itself is arm64.
-          bun install --frozen-lockfile --os=darwin --cpu=*
+          bun install --frozen-lockfile
           cd desktop
           bun install --frozen-lockfile
 

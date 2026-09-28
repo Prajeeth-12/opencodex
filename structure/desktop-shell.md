@@ -371,9 +371,11 @@ under `Contents/Resources/keyring` (or an adjacent standalone `keyring/` directo
 searches the launch working directory. Source and npm installs retain ordinary package
 resolution as their fallback.
 
-The macOS bundle verifier launches the signed sidecar from a disposable unrelated directory,
-starts an isolated proxy home, and requires the provider-keychain status probe to load and use
-the packaged binding. Merely finding a `.node` file in the app is not sufficient evidence.
+The macOS bundle verifier launches the signed sidecar from a disposable unrelated directory and
+requires its bounded, load-only keyring probe to expose both native constructors. It does not read
+or write an OS credential, which would make an ad-hoc CI identity depend on a consent dialog.
+Release verification separately requires both Darwin architecture files inside the universal app.
+Merely finding a `.node` file in the source checkout is not sufficient evidence.
 
 > Decision record: [ADR-6139](decisions/ADR-6139-packaged-native-keyring-binding.md)
 

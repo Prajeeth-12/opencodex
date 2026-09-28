@@ -98,3 +98,14 @@ export function loadKeyringBinding({
   }
   return load("@napi-rs/keyring") as KeyringBinding;
 }
+
+/** Load-only package probe: verifies constructors without reading or writing an OS credential. */
+export function inspectKeyringBinding(
+  load: () => KeyringBinding = loadKeyringBinding,
+): { schema: "ocx-keyring-load/1"; available: true } {
+  const binding = load();
+  if (typeof binding.Entry !== "function" || typeof binding.AsyncEntry !== "function") {
+    throw new Error("The keyring native binding does not export Entry and AsyncEntry constructors");
+  }
+  return { schema: "ocx-keyring-load/1", available: true };
+}
