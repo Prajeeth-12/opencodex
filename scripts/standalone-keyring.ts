@@ -9,7 +9,8 @@ export function stageStandaloneKeyringAddon(repoRoot: string, output: string, ta
   if (!asset) throw new Error(`No keyring native asset is declared for standalone target ${target}`);
   // Resolve optional target packages from their declaring wrapper. This preserves the lockfile
   // relationship without depending on Bun/npm/pnpm choosing a particular hoisting layout.
-  const keyringRequire = createRequire(join(repoRoot, "node_modules", "@napi-rs", "keyring", "package.json"));
+  const projectRequire = createRequire(join(repoRoot, "package.json"));
+  const keyringRequire = createRequire(projectRequire.resolve("@napi-rs/keyring"));
   let source: string;
   try {
     source = keyringRequire.resolve(asset.packageName);

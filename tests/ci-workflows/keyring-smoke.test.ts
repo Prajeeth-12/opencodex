@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { runKeyringSmoke, type KeyringSmokeEntry } from "../../scripts/keyring-smoke";
 import { stageStandaloneKeyringAddon } from "../../scripts/standalone-keyring";
 import {
@@ -238,7 +238,8 @@ describe("packaged keyring native binding", () => {
     const packageRoot = join(wrapper, "node_modules", asset.packageName);
     const source = join(packageRoot, asset.filename);
     mkdirSync(join(source, ".."), { recursive: true });
-    writeFileSync(join(wrapper, "package.json"), JSON.stringify({ name: "@napi-rs/keyring" }));
+    writeFileSync(join(wrapper, "package.json"), JSON.stringify({ name: "@napi-rs/keyring", main: "index.js" }));
+    writeFileSync(join(wrapper, "index.js"), "module.exports = {};");
     writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: asset.packageName, main: asset.filename }));
     writeFileSync(source, "native-addon");
     const destination = stageStandaloneKeyringAddon(root, output, "bun-darwin-arm64");
@@ -247,8 +248,35 @@ describe("packaged keyring native binding", () => {
     expect(readFileSync(destination, "utf8")).toBe("native-addon");
   });
 
+  test("stages an addon beside a symlinked wrapper in a virtual store", () => {
+    const root = tempRoot();
+    const output = join(root, "out");
+    const asset = keyringAssetForStandaloneTarget("bun-darwin-arm64")!;
+    const scope = join(root, "node_modules", "@napi-rs");
+    const store = join(root, "node_modules", ".pnpm");
+    const parent = join(store, "keyring-wrapper", "node_modules");
+    const wrapper = join(parent, "@napi-rs", "keyring");
+    const addon = join(store, "keyring-addon", "node_modules", asset.packageName);
+    mkdirSync(scope, { recursive: true });
+    mkdirSync(wrapper, { recursive: true });
+    mkdirSync(addon, { recursive: true });
+    writeFileSync(join(wrapper, "package.json"), JSON.stringify({ name: "@napi-rs/keyring", main: "index.js" }));
+    writeFileSync(join(wrapper, "index.js"), "module.exports = {};");
+    writeFileSync(join(addon, "package.json"), JSON.stringify({ name: asset.packageName, main: asset.filename }));
+    writeFileSync(join(addon, asset.filename), "virtual-store-addon");
+    symlinkSync(relative(scope, wrapper), join(scope, "keyring"), "dir");
+    symlinkSync(relative(join(parent, "@napi-rs"), addon), join(parent, asset.packageName), "dir");
+
+    const destination = stageStandaloneKeyringAddon(root, output, "bun-darwin-arm64");
+    expect(readFileSync(destination, "utf8")).toBe("virtual-store-addon");
+  });
+
   test("refuses a build whose target optional dependency was not installed", () => {
     const root = tempRoot();
+    const wrapper = join(root, "node_modules", "@napi-rs", "keyring");
+    mkdirSync(wrapper, { recursive: true });
+    writeFileSync(join(wrapper, "package.json"), JSON.stringify({ name: "@napi-rs/keyring", main: "index.js" }));
+    writeFileSync(join(wrapper, "index.js"), "module.exports = {};");
     expect(() => stageStandaloneKeyringAddon(root, join(root, "out"), "bun-darwin-x64"))
       .toThrow("install target optional dependencies");
   });
