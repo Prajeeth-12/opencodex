@@ -378,6 +378,20 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
 
   flushPendingToolCalls();
   releaseDeferredBarriers();
+
+  // Providers that fold developer→system can produce mid-conversation system messages,
+  // which strict models (e.g. Qwen) reject with "System message must be at the beginning".
+  // Consolidate all system messages at the front when the wire role is "system".
+  if (developerWireRole === "system") {
+    const firstMid = out.findIndex((m, i) => i > 0 && (m as Record<string, unknown>).role === "system");
+    if (firstMid >= 0) {
+      const systemMsgs = out.filter(m => (m as Record<string, unknown>).role === "system");
+      const otherMsgs = out.filter(m => (m as Record<string, unknown>).role !== "system");
+      const combined = systemMsgs.map(m => (m as Record<string, unknown>).content as string).join("\n\n");
+      return [{ role: "system", content: combined }, ...otherMsgs];
+    }
+  }
+
   return out;
 }
 
