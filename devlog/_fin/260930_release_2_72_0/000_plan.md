@@ -3,7 +3,7 @@
 Owner request (2026-09-30): merge the TokenLab sponsor PR, verify for regressions, release, check
 TokenLab's payment in the WORKS inbox through Aside, and have Aside email Vincent.
 
-Previous unit: `devlog/_plan/260929_tokenlab_sponsor/` merged #6221 (preset, `f6cddd7d69`) and opened
+Previous unit: `devlog/_fin/260929_tokenlab_sponsor/` merged #6221 (preset, `f6cddd7d69`) and opened
 #6240 (sponsor placement + CLI pinning, head `21cddd35c9`, 32/32 PR checks green). Release shape is
 2.71.0 (`devlog/_fin/260929_release_2_71_0/040_release.md`).
 
