@@ -14,3 +14,16 @@ Dispatches (after both gates of a SHA succeed), preview first:
 gh workflow run release.yml -R lidge-jun/opencodex --ref preview -f version=2.72.0-preview.20260930 -f tag=preview -f dry-run=false -f expected-sha=4f9e3f0afbbcf54a2b0421db8e962ec3d5682d5e
 gh workflow run release.yml -R lidge-jun/opencodex --ref main -f version=2.72.0 -f tag=latest -f dry-run=false -f expected-sha=5ab6d52b2a4da722d398e4ab50a6c621ac3ce087
 ```
+
+## Results
+
+| Check | Evidence |
+|---|---|
+| Preview gates | Cross-platform CI 36597831993 success (push), Service lifecycle 36597831950 success |
+| Main gates | Service lifecycle 36597841450 success; Cross-platform CI 36597841262 attempt 1 failed only `test 2/4` (batch 10/48 hit the 120 s process bound; the attribution sweep reported every file passing alone, "the timeout lives in multi-file process state"); one rerun, attempt 2 success |
+| Preview release | release.yml 36602348988 success; npm `preview` = 2.72.0-preview.20260930, gitHead `4f9e3f0afb`, bins `ocx`/`opencodex` intact; GitHub release prerelease, 25 assets |
+| Stable release | release.yml 36603799783 success; npm `latest` = 2.72.0 (published 17:45 UTC, visible ~10 min later, as with 2.71.0), gitHead `5ab6d52b2a`, bins intact; GitHub release v2.72.0 not prerelease, 25 assets; latest.json 2.72.0 signed for darwin-aarch64, darwin-x86_64, linux-x86_64, linux-x86_64-deb, windows-x86_64 |
+
+npm printed `"bin[...]" script name bin/ocx.mjs was invalid and removed` during both publishes; 2.70.0 and
+2.71.0 printed the same, and the registry metadata keeps both bins (the `./` prefix is normalized).
+The installed proxy and desktop app on this machine were not updated.
